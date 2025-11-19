@@ -172,22 +172,15 @@ class ISA(nn.Module):
         self.slot_dim = args.slot_dim
         self.query_opt = args.query_opt
 
-        self.res_h = args.resize_to[0] // args.patch_size
-        self.res_w = args.resize_to[1] // args.patch_size
-        self.token = int(self.res_h * self.res_w)
+        # === 3D点云配置（替代2D网格配置）===
+        self.coord_dim = 3  # 3D坐标维度（x, y, z）
+        self.sigma = 5  # 归一化因子
+        # 注意：不再需要res_h, res_w和预定义的abs_grid
+        # abs_grid将在forward中动态接收点云坐标
+        # === === ===
 
-        # === abs_grid ===
-        self.sigma = 5
-        xs = torch.linspace(-1, 1, steps=self.res_w)                                                # (C_x)
-        ys = torch.linspace(-1, 1, steps=self.res_h)                                                # (C_y)
-
-        xs, ys = torch.meshgrid(xs, ys, indexing='xy')                                              # (C_x, C_y), (C_x, C_y)
-        xs = xs.reshape(1, 1, -1, 1)                                                                # (1, 1, C_x * C_y, 1)
-        ys = ys.reshape(1, 1, -1, 1)                                                                # (1, 1, C_x * C_y, 1)
-        self.abs_grid = nn.Parameter(torch.cat([xs, ys], dim=-1), requires_grad=False)              # (1, 1, token, 2)
-        assert self.abs_grid.shape[2] == self.token
-
-        self.h = nn.Linear(2, self.slot_dim)
+        # 3D坐标编码网络（从2D改为3D）
+        self.h = nn.Linear(3, self.slot_dim)  # 用于get_rel_grid
         # === === ===
 
         # === Slot related ===
@@ -200,8 +193,9 @@ class ISA(nn.Module):
             init.xavier_uniform_(self.slots_mu)
             init.xavier_uniform_(self.slots_logsigma)
 
-        self.S_s = nn.Parameter(torch.Tensor(1, self.num_slots, 1, 2))  # (1, S, 1, 2)
-        self.S_p = nn.Parameter(torch.Tensor(1, self.num_slots, 1, 2))  # (1, S, 1, 2)
+        # 3D slot参考坐标系参数（从2D改为3D）
+        self.S_s = nn.Parameter(torch.Tensor(1, self.num_slots, 1, 3))  # (1, S, 1, 3) - 3D尺度
+        self.S_p = nn.Parameter(torch.Tensor(1, self.num_slots, 1, 3))  # (1, S, 1, 3) - 3D位置
 
         init.normal_(self.S_s, mean=0., std=.02)
         init.normal_(self.S_p, mean=0., std=.02)
@@ -219,7 +213,8 @@ class ISA(nn.Module):
         self.K = nn.Linear(self.slot_dim, self.slot_dim, bias=False)
         self.V = nn.Linear(self.slot_dim, self.slot_dim, bias=False)
 
-        self.g = nn.Linear(2, self.slot_dim)
+        # 3D相对坐标编码网络（从2D改为3D）
+        self.g = nn.Linear(3, self.slot_dim)  # 用于forward中的相对坐标
         self.f = nn.Sequential(nn.Linear(self.slot_dim, self.slot_dim),
                                nn.ReLU(inplace=True),
                                nn.Linear(self.slot_dim, self.slot_dim))
@@ -234,41 +229,45 @@ class ISA(nn.Module):
 
         self.final_layer = nn.Linear(self.slot_dim, self.slot_dim)
 
-    def get_rel_grid(self, attn):
-        # :arg attn: (B, S, token)
+    def get_rel_grid(self, attn, abs_grid):
+        # :arg attn: (B, S, N) - attention权重
+        # :arg abs_grid: (B, S, N, 3) - 3D点云坐标
         #
-        # :return: (B, S, N, D_slot)
+        # :return rel_grid: (B, S, N, D_slot) - 相对坐标编码
 
-        B, S = attn.shape[:2]
-        attn = attn.unsqueeze(dim=2)                                            # (B, S, 1, token)
-
-        abs_grid = self.abs_grid.expand(B, S, self.token, 2)                    # (B, S, token, 2)
+        B, S, N = attn.shape
+        attn = attn.unsqueeze(dim=2)                                            # (B, S, 1, N)
         
-        S_p = torch.einsum('bsjd,bsij->bsd', abs_grid, attn)                    # (B, S, token, 2) x (B, S, 1, token) -> (B, S, 2)
-        S_p = S_p.unsqueeze(dim=2)                                              # (B, S, 1, 2)
+        # 计算slot中心位置（3D）- 加权平均
+        S_p = torch.einsum('bsjd,bsij->bsd', abs_grid, attn)                    # (B, S, N, 3) x (B, S, 1, N) -> (B, S, 3)
+        S_p = S_p.unsqueeze(dim=2)                                              # (B, S, 1, 3)
 
-        values_ss = torch.pow(abs_grid - S_p, 2)                                # (B, S, token, 2)
-        S_s = torch.einsum('bsjd,bsij->bsd', values_ss, attn)                   # (B, S, token, 2) x (B, S, 1, token) -> (B, S, 2)
-        S_s = torch.sqrt(S_s)                                                   # (B, S, 2)
-        S_s = S_s.unsqueeze(dim=2)                                              # (B, S, 1, 2)
+        # 计算slot尺度（3D）- 加权方差的平方根
+        values_ss = torch.pow(abs_grid - S_p, 2)                                # (B, S, N, 3)
+        S_s = torch.einsum('bsjd,bsij->bsd', values_ss, attn)                   # (B, S, N, 3) x (B, S, 1, N) -> (B, S, 3)
+        S_s = torch.sqrt(S_s)                                                   # (B, S, 3)
+        S_s = S_s.unsqueeze(dim=2)                                              # (B, S, 1, 3)
 
-        rel_grid = (abs_grid - S_p) / (S_s * self.sigma)                        # (B, S, token, 2)
-        rel_grid = self.h(rel_grid)                                             # (B, S, token, D_slot)
+        # 归一化得到相对坐标（3D）
+        rel_grid = (abs_grid - S_p) / (S_s * self.sigma + 1e-8)                 # (B, S, N, 3)
+        rel_grid = self.h(rel_grid)                                             # (B, S, N, D_slot) - 通过MLP编码
 
         return rel_grid
 
 
-    def forward(self, inputs):
-        # :arg inputs:              (B, token, D)
+    def forward(self, inputs, point_coords):
+        # :arg inputs:              (B, N, D) - 点云特征
+        # :arg point_coords:        (B, N, 3) - 点云的3D坐标（已归一化到[-1, 1]）
         #
-        # :return slots:            (B, S, D_slot)
-        # :return attn:             (B, S, token)
+        # :return slots:            (B, S, D_slot) - slot表示
+        # :return attn:             (B, S, N) - attention权重
 
         B, N, D = inputs.shape
         S = self.num_slots
         D_slot = self.slot_dim
         epsilon = 1e-8
 
+        # 初始化slots
         if self.query_opt:
             slots = self.slots.expand(B, S, D_slot)                     # (B, S, D_slot)
         else:
@@ -277,23 +276,28 @@ class ISA(nn.Module):
             slots = mu + sigma * torch.randn(mu.shape, device=sigma.device, dtype=sigma.dtype)
 
         slots_init = slots
-        inputs = self.initial_mlp(inputs).unsqueeze(dim=1)          # (B, 1, token, D_slot)
-        inputs = inputs.expand(B, S, N, D_slot)                     # (B * F, S, N', D_slot)
+        
+        # 预处理输入特征
+        inputs = self.initial_mlp(inputs).unsqueeze(dim=1)          # (B, 1, N, D_slot)
+        inputs = inputs.expand(B, S, N, D_slot)                     # (B, S, N, D_slot)
 
-        abs_grid = self.abs_grid.expand(B, S, self.token, 2)        # (B, S, token, 2)
+        # 构建3D abs_grid：从输入的点云坐标
+        abs_grid = point_coords.unsqueeze(1)                        # (B, 1, N, 3)
+        abs_grid = abs_grid.expand(B, S, N, 3)                      # (B, S, N, 3)
 
-        assert torch.sum(torch.isnan(abs_grid)) == 0
+        assert torch.sum(torch.isnan(abs_grid)) == 0, "abs_grid包含NaN"
 
-        S_s = self.S_s.expand(B, S, 1, 2)                           # (B, S, 1, 2)
-        S_p = self.S_p.expand(B, S, 1, 2)                           # (B, S, 1, 2)
+        # 初始化slot参考坐标系（3D）
+        S_s = self.S_s.expand(B, S, 1, 3)                           # (B, S, 1, 3)
+        S_p = self.S_p.expand(B, S, 1, 3)                           # (B, S, 1, 3)
 
         for t in range(self.iters + 1):
             # last iteration for S_s and S_p: t = self.iters
             # last meaningful iteration: t = self.iters - 1
 
-            assert torch.sum(torch.isnan(slots)) == 0, f"Iteration {t}"
-            assert torch.sum(torch.isnan(S_s)) == 0, f"Iteration {t}"
-            assert torch.sum(torch.isnan(S_p)) == 0, f"Iteration {t}"
+            assert torch.sum(torch.isnan(slots)) == 0, f"Iteration {t}: slots包含NaN"
+            assert torch.sum(torch.isnan(S_s)) == 0, f"Iteration {t}: S_s包含NaN"
+            assert torch.sum(torch.isnan(S_p)) == 0, f"Iteration {t}: S_p包含NaN"
             
             if self.query_opt and (t == self.iters - 1):
                 slots = slots.detach() + slots_init - slots_init.detach()
@@ -301,33 +305,33 @@ class ISA(nn.Module):
             slots_prev = slots
             slots = self.norm(slots)
 
-            # === key and value calculation using rel_grid ===
-            rel_grid = (abs_grid - S_p) / (S_s * self.sigma)        # (B, S, token, 2)
-            k = self.f(self.K(inputs) + self.g(rel_grid))           # (B, S, token, D_slot)
-            v = self.f(self.V(inputs) + self.g(rel_grid))           # (B, S, token, D_slot)
+            # === key and value calculation using rel_grid (3D) ===
+            rel_grid = (abs_grid - S_p) / (S_s * self.sigma + 1e-8)  # (B, S, N, 3) - 3D相对坐标
+            k = self.f(self.K(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
+            v = self.f(self.V(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
 
             # === Calculate attention ===
-            q = self.Q(slots).unsqueeze(dim=-1)                     # (B, S, D_slot, 1)
+            q = self.Q(slots).unsqueeze(dim=-1)                      # (B, S, D_slot, 1)
 
-            dots = torch.einsum('bsdi,bsjd->bsj', q, k)             # (B, S, D_slot, 1) x (B, S, token, D_slot) -> (B, S, token)
-            dots *=  self.scale                                     # (B, S, token)
-            attn = dots.softmax(dim=1) + epsilon                    # (B, S, token)
+            dots = torch.einsum('bsdi,bsjd->bsj', q, k)              # (B, S, D_slot, 1) x (B, S, N, D_slot) -> (B, S, N)
+            dots *=  self.scale                                      # (B, S, N)
+            attn = dots.softmax(dim=1) + epsilon                     # (B, S, N) - softmax over slots
 
             # === Weighted mean ===
-            attn = attn / attn.sum(dim=-1, keepdim=True)            # (B, S, token)
-            attn = attn.unsqueeze(dim=2)                            # (B, S, 1, token)
-            updates = torch.einsum('bsjd,bsij->bsd', v, attn)       # (B, S, token, D_slot) x (B, S, 1, token) -> (B, S, D_slot)
+            attn = attn / attn.sum(dim=-1, keepdim=True)             # (B, S, N) - 归一化
+            attn = attn.unsqueeze(dim=2)                             # (B, S, 1, N)
+            updates = torch.einsum('bsjd,bsij->bsd', v, attn)        # (B, S, N, D_slot) x (B, S, 1, N) -> (B, S, D_slot)
 
-            # === Update S_p and S_s ===
-            S_p = torch.einsum('bsjd,bsij->bsd', abs_grid, attn)    # (B, S, token, 2) x (B, S, 1, token) -> (B, S, 2)
-            S_p = S_p.unsqueeze(dim=2)                              # (B, S, 1, 2)
+            # === Update S_p and S_s (3D) ===
+            S_p = torch.einsum('bsjd,bsij->bsd', abs_grid, attn)     # (B, S, N, 3) x (B, S, 1, N) -> (B, S, 3)
+            S_p = S_p.unsqueeze(dim=2)                               # (B, S, 1, 3)
 
-            values_ss = torch.pow(abs_grid - S_p, 2)                # (B, S, token, 2)
-            S_s = torch.einsum('bsjd,bsij->bsd', values_ss, attn)   # (B, S, token, 2) x (B, S, 1, token) -> (B, S, 2)
-            S_s = torch.sqrt(S_s)                                   # (B, S, 2)
-            S_s = S_s.unsqueeze(dim=2)                              # (B, S, 1, 2)
+            values_ss = torch.pow(abs_grid - S_p, 2)                 # (B, S, N, 3)
+            S_s = torch.einsum('bsjd,bsij->bsd', values_ss, attn)    # (B, S, N, 3) x (B, S, 1, N) -> (B, S, 3)
+            S_s = torch.sqrt(S_s + 1e-8)                             # (B, S, 3) - 添加epsilon避免sqrt(0)
+            S_s = S_s.unsqueeze(dim=2)                               # (B, S, 1, 3)
 
-            # === Update ===
+            # === Update slots (与坐标维度无关，保持不变) ===
             if t != self.iters:
                 slots = self.gru(
                     updates.reshape(-1, self.slot_dim),
@@ -336,8 +340,8 @@ class ISA(nn.Module):
                 slots = slots.reshape(B, -1, self.slot_dim)
                 slots = self.mlp(slots)
 
-        slots = self.final_layer(slots_prev)                        # (B, S, D_slot)
-        attn = attn.squeeze(dim=2)                                  # (B, S, token)
+        slots = self.final_layer(slots_prev)                         # (B, S, D_slot)
+        attn = attn.squeeze(dim=2)                                   # (B, S, N)
 
         return slots, attn
     
@@ -496,33 +500,44 @@ class DINOSAURpp(nn.Module):
         return reconstruction, masks
 
 
-    def forward(self, features):
-        # :arg features: (B, token, 768)
+    def forward(self, features, point_coords=None):
+        # :arg features: (B, N, feature_dim) - 点云特征
+        # :arg point_coords: (B, N, 3) - 点云的3D坐标（已归一化），ISA模式下必需
         #
-        # :return reconstruction: (B, token, 768)
-        # :return slots: (B, S, D_slot)
-        # :return masks: (B, S, token)
+        # :return reconstruction: (B, N, feature_dim) - 重建特征
+        # :return slots: (B, S, D_slot) - slot表示
+        # :return masks: (B, S, N) - 分割mask
 
-        B, token, _ = features.shape
+        B, N, _ = features.shape
 
-        if self.ISA: 
-            slots, attn = self.slot_encoder(features)                           # (B, S, D_slot), (B, S, token)
-            assert torch.sum(torch.isnan(slots)) == 0
-            assert torch.sum(torch.isnan(attn)) == 0
+        if self.ISA:
+            # ISA模式：需要点云坐标
+            assert point_coords is not None, "ISA模式需要提供point_coords参数"
+            
+            slots, attn = self.slot_encoder(features, point_coords)             # (B, S, D_slot), (B, S, N)
+            assert torch.sum(torch.isnan(slots)) == 0, "slots包含NaN"
+            assert torch.sum(torch.isnan(attn)) == 0, "attn包含NaN"
 
-            rel_grid = self.slot_encoder.get_rel_grid(attn)                     # (B, S, token, D_slot)
+            # 构建abs_grid用于get_rel_grid
+            abs_grid = point_coords.unsqueeze(1)                                # (B, 1, N, 3)
+            abs_grid = abs_grid.expand(B, self.slot_num, N, 3)                  # (B, S, N, 3)
+            
+            rel_grid = self.slot_encoder.get_rel_grid(attn, abs_grid)           # (B, S, N, D_slot)
 
-            slot_maps = self.sbd_slots(slots) + rel_grid                        # (B, S, token, D_slot)
-            slot_maps = self.slot_decoder(slot_maps)                            # (B, S, token, 768 + 1)
+            slot_maps = self.sbd_slots(slots) + rel_grid                        # (B, S, N, D_slot)
+            slot_maps = self.slot_decoder(slot_maps.reshape(B * self.slot_num, N, -1))  # (B*S, N, feature_dim+1)
+            slot_maps = slot_maps.reshape(B, self.slot_num, N, -1)              # (B, S, N, feature_dim+1)
         
         else:
-            slots = self.slot_encoder(features)                           # (B, S, D_slot), (B, S, token)
-            assert torch.sum(torch.isnan(slots)) == 0
+            # SA模式：不需要点云坐标
+            slots = self.slot_encoder(features)                                 # (B, S, D_slot)
+            assert torch.sum(torch.isnan(slots)) == 0, "slots包含NaN"
 
-            slot_maps = self.sbd_slots(slots)
-            slot_maps = self.slot_decoder(slot_maps)                            # (B, S, token, 768 + 1)
+            slot_maps = self.sbd_slots(slots)                                   # (B, S, N, D_slot)
+            slot_maps = self.slot_decoder(slot_maps.reshape(B * self.slot_num, N, -1))  # (B*S, N, feature_dim+1)
+            slot_maps = slot_maps.reshape(B, self.slot_num, N, -1)              # (B, S, N, feature_dim+1)
 
-        reconstruction, masks = self.reconstruct_feature_map(slot_maps)     # (B, token, 768), (B, S, token)
+        reconstruction, masks = self.reconstruct_feature_map(slot_maps)         # (B, N, feature_dim), (B, S, N)
 
         return reconstruction, slots, masks
 
