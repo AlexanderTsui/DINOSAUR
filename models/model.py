@@ -318,7 +318,9 @@ class ISA(nn.Module):
             attn = dots.softmax(dim=1) + epsilon                     # (B, S, N) - softmax over slots
 
             # === Weighted mean ===
-            attn = attn / attn.sum(dim=-1, keepdim=True)             # (B, S, N) - 归一化
+            # 添加额外的epsilon防止空slot导致除0
+            attn_sum = attn.sum(dim=-1, keepdim=True)                # (B, S, 1)
+            attn = attn / (attn_sum + epsilon)                       # (B, S, N) - 归一化
             attn = attn.unsqueeze(dim=2)                             # (B, S, 1, N)
             updates = torch.einsum('bsjd,bsij->bsd', v, attn)        # (B, S, N, D_slot) x (B, S, 1, N) -> (B, S, D_slot)
 
