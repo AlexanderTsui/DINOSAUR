@@ -49,7 +49,7 @@ sys.path.insert(0, os.path.join(current_dir, 'utils'))
 from visualizer import visualize_slot_assignment, visualize_reconstruction_error, visualize_slot_statistics
 
 # 导入SPFormer
-from test_3d_isa_with_spformer import TestSPFormerExtractor
+from test_3d_isa import TestSPFormerExtractor
 
 
 def load_config(config_path):
@@ -111,7 +111,7 @@ def create_model(config):
             
             # 导入SPFormer相关模块
             from spformer.model import SPFormer
-            from test_3d_isa_with_spformer import TestSPFormerExtractor
+            from test_3d_isa import TestSPFormerExtractor
             
             # 创建提取器（会加载配置）
             spformer_extractor = TestSPFormerExtractor(

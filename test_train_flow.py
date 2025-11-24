@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(current_dir, '../SPFormer'))
 from models.model import DINOSAURpp
 from models.wrapper import FeatureProjector, SPFormerDINOSAUR
 from models.losses import DINOSAURLoss
-from test_3d_isa_with_spformer import TestSPFormerExtractor
+from test_3d_isa import TestSPFormerExtractor
 
 print("\n" + "="*60)
 print("训练流程测试 (模拟数据)")
