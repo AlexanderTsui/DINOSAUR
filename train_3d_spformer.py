@@ -359,6 +359,13 @@ def main():
     config_path = os.path.join(current_dir, args.config)
     config = load_config(config_path)
     
+    # GPU绑定（使用配置文件指定的卡）
+    gpu_ids = config.get('gpu_ids')
+    if gpu_ids:
+        gpu_ids_str = ','.join(str(g) for g in gpu_ids)
+        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_ids_str
+        print(f"[Info] 使用GPU: {gpu_ids_str}")
+    
     if args.test_run:
         print("\n⚠️  测试运行模式：仅训练2个epoch")
         config['train']['epochs'] = 2
