@@ -61,7 +61,7 @@ class TestConfig:
         
         # === 输出配置 ===
         self.visualize = True        # 是否生成可视化图表
-        self.output_dir = './visualization/test_results_3d' # 结果保存路径
+        self.output_dir = './visualizations/test_results_3d' # 结果保存路径
 
 
 def generate_toy_point_cloud(config):
