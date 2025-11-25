@@ -25,6 +25,7 @@ class DINOSAURLoss(nn.Module):
                 - mask_entropy
                 - slot_diversity
                 - mask_sparsity
+                - mask_uniformity  # 新增：mask均匀性损失权重
         """
         super().__init__()
         
@@ -32,6 +33,7 @@ class DINOSAURLoss(nn.Module):
         self.w_entropy = loss_weights.get('mask_entropy', 0.15)
         self.w_diversity = loss_weights.get('slot_diversity', 0.08)
         self.w_sparsity = loss_weights.get('mask_sparsity', 0.05)
+        self.w_uniformity = loss_weights.get('mask_uniformity', 0.3)  # 新增权重
         
         self.mse = nn.MSELoss()
     
@@ -80,19 +82,16 @@ class DINOSAURLoss(nn.Module):
             slots: (B, S, D_slot)
         
         计算Slot之间的余弦相似度，惩罚过高的相似度
+        改进：即使slot为空也计算，通过添加小噪声避免除0
         """
         B, S, D = slots.shape
         
-        # 检测空slot（L2范数接近0）
-        slot_norms = torch.norm(slots, p=2, dim=-1)  # (B, S)
-        valid_slots = slot_norms > 1e-6
-        
-        # 至少需要2个有效slot才能计算diversity
-        if valid_slots.sum(dim=1).min() < 2:
-            return torch.tensor(0.0, device=slots.device)
+        # 添加小噪声避免完全为0的slot导致归一化问题
+        # 这样即使slot为空，也能计算相似度（空slot之间相似度会很高，会被惩罚）
+        slots_safe = slots + torch.randn_like(slots) * 1e-6
         
         # L2归一化（添加eps防止除0）
-        slots_norm = F.normalize(slots, p=2, dim=-1, eps=1e-8)  # (B, S, D)
+        slots_norm = F.normalize(slots_safe, p=2, dim=-1, eps=1e-8)  # (B, S, D)
         
         # 计算相似度矩阵
         similarity = torch.bmm(slots_norm, slots_norm.transpose(1, 2))  # (B, S, S)
@@ -101,11 +100,8 @@ class DINOSAURLoss(nn.Module):
         mask = ~torch.eye(S, dtype=torch.bool, device=slots.device).unsqueeze(0).expand(B, S, S)
         similarity_off_diag = similarity[mask].reshape(B, S, S-1)
         
-        # 只对有效slot对计算损失
-        # 为简化，这里计算所有非对角元素的平均（包含一些0 slot的影响）
-        # 更精确的做法是只计算valid slot之间的相似度，但会更复杂
-        
         # 惩罚高相似度（希望slot彼此不同）
+        # 如果slot坍塌，相似度会接近1，损失会很大
         return similarity_off_diag.abs().mean()
     
     def mask_sparsity_loss(self, masks):
@@ -119,6 +115,58 @@ class DINOSAURLoss(nn.Module):
         注：空slot的mask全为0也是合理的，不需要特殊处理
         """
         return masks.abs().mean()
+    
+    def mask_uniformity_loss(self, masks):
+        """
+        Mask均匀性损失 - 防止所有点塌缩到单个slot
+        
+        Args:
+            masks: (B, S, N) - 每个超点在S个Slot上的分布
+        
+        改进版：同时考虑软分配和硬分配
+        - 软分配：计算mask总和的方差
+        - 硬分配：计算argmax对应的点数方差
+        """
+        B, S, N = masks.shape
+        
+        # 数值稳定性：确保masks非负且有限
+        masks = torch.clamp(masks, min=0.0, max=1.0)
+        masks = torch.nan_to_num(masks, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        # === 方法1：软分配方差（原方法，保留） ===
+        slot_counts_soft = masks.sum(dim=2)  # (B, S) - 每个slot的软分配点数
+        slot_counts_soft = torch.clamp(slot_counts_soft, min=0.0, max=float(N))
+        
+        slot_counts_mean_soft = slot_counts_soft.mean(dim=1, keepdim=True)  # (B, 1)
+        variance_soft = ((slot_counts_soft - slot_counts_mean_soft) ** 2).mean(dim=1)  # (B,)
+        
+        ideal_count = N / S
+        normalized_variance_soft = variance_soft / (ideal_count ** 2 + 1e-8)
+        normalized_variance_soft = torch.clamp(normalized_variance_soft, min=0.0, max=100.0)
+        
+        # === 方法2：硬分配方差（新增，基于argmax） ===
+        # 计算每个点分配到哪个slot（硬分配）
+        hard_assignments = torch.argmax(masks, dim=1)  # (B, N) - 每个点的slot索引
+        
+        # 统计每个slot分配到的点数
+        slot_counts_hard = torch.zeros(B, S, device=masks.device)
+        for b in range(B):
+            slot_counts_hard[b] = torch.bincount(
+                hard_assignments[b], 
+                minlength=S
+            ).float()
+        
+        slot_counts_mean_hard = slot_counts_hard.mean(dim=1, keepdim=True)  # (B, 1)
+        variance_hard = ((slot_counts_hard - slot_counts_mean_hard) ** 2).mean(dim=1)  # (B,)
+        
+        normalized_variance_hard = variance_hard / (ideal_count ** 2 + 1e-8)
+        normalized_variance_hard = torch.clamp(normalized_variance_hard, min=0.0, max=100.0)
+        
+        # === 综合两种方法（硬分配权重更大） ===
+        # 软分配：20%权重，硬分配：80%权重（增加硬分配权重）
+        combined_variance = 0.2 * normalized_variance_soft + 0.8 * normalized_variance_hard
+        
+        return combined_variance.mean()
     
     def forward(self, reconstruction, sp_feats_proj, slots, masks):
         """
@@ -139,13 +187,15 @@ class DINOSAURLoss(nn.Module):
         loss_entropy = self.mask_entropy_loss(masks)
         loss_diversity = self.slot_diversity_loss(slots)
         loss_sparsity = self.mask_sparsity_loss(masks)
+        loss_uniformity = self.mask_uniformity_loss(masks)  # 新增
         
         # 加权求和
         total_loss = (
             self.w_recon * loss_recon +
             self.w_entropy * loss_entropy +
             self.w_diversity * loss_diversity +
-            self.w_sparsity * loss_sparsity
+            self.w_sparsity * loss_sparsity +
+            self.w_uniformity * loss_uniformity  # 新增
         )
         
         # 返回损失字典（用于记录）
@@ -154,7 +204,8 @@ class DINOSAURLoss(nn.Module):
             'reconstruction': loss_recon.item(),
             'mask_entropy': loss_entropy.item(),
             'slot_diversity': loss_diversity.item(),
-            'mask_sparsity': loss_sparsity.item()
+            'mask_sparsity': loss_sparsity.item(),
+            'mask_uniformity': loss_uniformity.item()  # 新增
         }
         
         return total_loss, loss_dict

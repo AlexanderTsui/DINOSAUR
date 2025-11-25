@@ -1,10 +1,10 @@
 """
-DINOSAUR 3D训练脚本 (SPFormer特征输入)
+DINOSAUR 3D训练脚本 (PointBERT特征输入)
 
 训练流程:
-1. S3DIS数据加载 → 超点生成
-2. SPFormer提取超点特征 (冻结)
-3. 特征投影 32→384维
+1. S3DIS数据加载 → 重采样到8192点
+2. PointBERT提取超点特征 (冻结)
+3. 特征投影 384→768维
 4. DINOSAUR ISA处理
 5. 4项损失计算
 6. TensorBoard监控
@@ -36,20 +36,16 @@ except ImportError:
 # 添加路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
-sys.path.insert(0, os.path.join(current_dir, '../SPFormer'))
+sys.path.insert(0, os.path.join(current_dir, '../PointBERT'))
 
 # 导入自定义模块
-from data.s3dis_dataset import S3DISDataset, collate_fn
-from models.model import DINOSAURpp
-from models.wrapper import FeatureProjector, SPFormerDINOSAUR
+from data.s3dis_dataset_pointbert import S3DISPointBERTDataset, collate_fn_pointbert
+from models.pointbert_wrapper import create_pointbert_dinosaur_model
 from models.losses import DINOSAURLoss
 
-# 导入可视化工具（使用完整路径避免与原utils.py冲突）
+# 导入可视化工具
 sys.path.insert(0, os.path.join(current_dir, 'utils'))
 from visualizer import visualize_slot_assignment, visualize_reconstruction_error, visualize_slot_statistics
-
-# 导入SPFormer
-from test_3d_isa import TestSPFormerExtractor
 
 
 def load_config(config_path):
@@ -75,96 +71,6 @@ def setup_distributed():
         return 0, 1, 0
 
 
-def create_model(config):
-    """创建模型"""
-    import gorilla
-    
-    # 配置DINOSAUR参数
-    class Args:
-        def __init__(self):
-            self.num_slots = config['model']['num_slots']
-            self.slot_dim = config['model']['slot_dim']
-            self.slot_att_iter = config['model']['slot_att_iter']
-            self.query_opt = config['model']['query_opt']
-            self.ISA = config['model']['ISA']
-            self.token_num = config['model']['token_num']
-            self.num_points = config['model']['num_points']
-            self.point_feature_dim = config['model']['din_feature_dim']
-    
-    args = Args()
-    
-    # 创建SPFormer提取器
-    spformer_config_path = os.path.join(
-        current_dir,
-        config['data']['spformer_config']
-    )
-    
-    # 检查是否有预训练权重
-    spformer_checkpoint = config['data'].get('spformer_checkpoint', None)
-    
-    if spformer_checkpoint:
-        # 使用预训练权重
-        spformer_checkpoint_path = os.path.join(current_dir, spformer_checkpoint)
-        
-        if os.path.exists(spformer_checkpoint_path):
-            print(f"[Info] 加载SPFormer预训练权重: {spformer_checkpoint_path}")
-            
-            # 导入SPFormer相关模块
-            from spformer.model import SPFormer
-            from test_3d_isa import TestSPFormerExtractor
-            
-            # 创建提取器（会加载配置）
-            spformer_extractor = TestSPFormerExtractor(
-                spformer_config_path,
-                device='cuda'
-            )
-            
-            # 加载预训练权重
-            gorilla.load_checkpoint(
-                spformer_extractor.model, 
-                spformer_checkpoint_path,
-                strict=False
-            )
-            
-            # 冻结SPFormer
-            for param in spformer_extractor.model.parameters():
-                param.requires_grad = False
-            spformer_extractor.model.eval()
-            
-            frozen_params = sum(1 for p in spformer_extractor.model.parameters() if not p.requires_grad)
-            total_params = sum(1 for p in spformer_extractor.model.parameters())
-            print(f"[Info] ✓ SPFormer权重加载成功")
-            print(f"[Info] ✓ SPFormer已冻结 ({frozen_params}/{total_params} 参数)")
-        else:
-            print(f"[Warning] 预训练权重不存在: {spformer_checkpoint_path}")
-            print(f"[Warning] 使用随机初始化")
-            spformer_extractor = TestSPFormerExtractor(
-                spformer_config_path,
-                device='cuda'
-            )
-    else:
-        # 随机初始化
-        print(f"[Info] SPFormer使用随机初始化（无预训练权重）")
-        spformer_extractor = TestSPFormerExtractor(
-            spformer_config_path,
-            device='cuda'
-        )
-    
-    # 创建投影层
-    projector = FeatureProjector(
-        in_dim=config['model']['spformer_dim'],
-        out_dim=config['model']['din_feature_dim']
-    )
-    
-    # 创建DINOSAUR
-    dinosaur = DINOSAURpp(args)
-    
-    # 封装完整模型
-    model = SPFormerDINOSAUR(spformer_extractor, projector, dinosaur)
-    
-    return model
-
-
 def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, epoch, config, writer, rank):
     """训练一个epoch"""
     model.train()
@@ -183,54 +89,99 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
         pbar = train_loader
     
     for iter_idx, batch in enumerate(pbar):
-        sp_coords = batch['sp_coords'].cuda()
-        xyz_full = batch['xyz_full']
-        rgb_full = batch['rgb_full']
-        sp_labels = batch['sp_labels']
+        xyzrgb = batch['xyzrgb'].cuda()
         
         optimizer.zero_grad()
         
         # 混合精度前向传播
         with autocast(enabled=config['train']['use_amp']):
             try:
-                reconstruction, slots, masks, sp_feats_proj = model(
-                    xyz_full, rgb_full, sp_labels, sp_coords
+                reconstruction, slots, masks, sp_feats_proj = model(xyzrgb)
+                
+                # 检查NaN和Inf（更全面的检查）
+                has_nan = (
+                    torch.isnan(reconstruction).any() or 
+                    torch.isnan(slots).any() or 
+                    torch.isnan(masks).any() or
+                    torch.isnan(sp_feats_proj).any()
+                )
+                has_inf = (
+                    torch.isinf(reconstruction).any() or 
+                    torch.isinf(slots).any() or 
+                    torch.isinf(masks).any() or
+                    torch.isinf(sp_feats_proj).any()
                 )
                 
-                # 检查NaN
-                if torch.isnan(reconstruction).any() or torch.isnan(slots).any():
-                    print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 检测到NaN，跳过此batch")
+                if has_nan or has_inf:
+                    print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 检测到NaN/Inf (NaN={has_nan}, Inf={has_inf})，跳过此batch")
+                    optimizer.zero_grad()
                     continue
                 
                 # 计算损失
                 loss, loss_dict = criterion(reconstruction, sp_feats_proj, slots, masks)
                 
-                # 检查loss是否为NaN
-                if torch.isnan(loss):
-                    print(f"[警告] Epoch {epoch}, Iter {iter_idx}: Loss为NaN，跳过此batch")
+                # 检查loss是否为NaN或Inf
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"[警告] Epoch {epoch}, Iter {iter_idx}: Loss异常 (loss={loss.item()})，跳过此batch")
+                    optimizer.zero_grad()
+                    continue
+                
+                # 检查loss是否过大（可能是数值不稳定）
+                if loss.item() > 1e6:
+                    print(f"[警告] Epoch {epoch}, Iter {iter_idx}: Loss过大 (loss={loss.item():.2e})，跳过此batch")
+                    optimizer.zero_grad()
                     continue
                     
-            except AssertionError as e:
+            except (AssertionError, RuntimeError) as e:
                 print(f"[错误] Epoch {epoch}, Iter {iter_idx}: {e}")
                 print("[跳过此batch并继续训练]")
+                optimizer.zero_grad()
                 continue
         
         # 反向传播
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        
-        # 梯度裁剪并记录
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            model.get_trainable_params(),
-            config['train']['grad_clip_norm']
-        )
-        
-        # 检查梯度异常
-        if torch.isnan(grad_norm) or grad_norm > 100:
-            print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 梯度异常 (norm={grad_norm:.2f})，跳过更新")
+        try:
+            scaler.scale(loss).backward()
+        except RuntimeError as e:
+            print(f"[错误] Epoch {epoch}, Iter {iter_idx}: 反向传播失败: {e}")
             optimizer.zero_grad()
+            scaler.update()
             continue
         
+        # Unscale梯度用于裁剪
+        scaler.unscale_(optimizer)
+        
+        # 检查梯度中的NaN/Inf（在裁剪之前）
+        model_params = model.get_trainable_params() if hasattr(model, 'get_trainable_params') else model.module.get_trainable_params()
+        has_grad_nan = any(torch.isnan(p.grad).any() if p.grad is not None else False for p in model_params)
+        has_grad_inf = any(torch.isinf(p.grad).any() if p.grad is not None else False for p in model_params)
+        
+        if has_grad_nan or has_grad_inf:
+            print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 梯度包含NaN/Inf (NaN={has_grad_nan}, Inf={has_grad_inf})，跳过更新")
+            optimizer.zero_grad()
+            scaler.update()
+            continue
+        
+        # 梯度裁剪并记录
+        try:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model_params,
+                config['train']['grad_clip_norm']
+            )
+        except RuntimeError as e:
+            print(f"[错误] Epoch {epoch}, Iter {iter_idx}: 梯度裁剪失败: {e}")
+            optimizer.zero_grad()
+            scaler.update()
+            continue
+        
+        # 检查梯度异常
+        if torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm > 100:
+            print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 梯度异常 (norm={grad_norm})，跳过更新")
+            # 重置scaler状态
+            optimizer.zero_grad()
+            scaler.update()  # 更新scaler状态
+            continue
+        
+        # 优化器步进
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -286,14 +237,9 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
     
     with torch.no_grad():
         for batch in pbar:
-            sp_coords = batch['sp_coords'].cuda()
-            xyz_full = batch['xyz_full']
-            rgb_full = batch['rgb_full']
-            sp_labels = batch['sp_labels']
+            xyzrgb = batch['xyzrgb'].cuda()
             
-            reconstruction, slots, masks, sp_feats_proj = model(
-                xyz_full, rgb_full, sp_labels, sp_coords
-            )
+            reconstruction, slots, masks, sp_feats_proj = model(xyzrgb)
             
             # 计算所有损失项
             loss, loss_dict = criterion(reconstruction, sp_feats_proj, slots, masks)
@@ -328,38 +274,38 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
 
 @torch.no_grad()
 def visualize_samples(model, vis_samples, epoch, config, output_dir):
-    """可视化样本"""
+    """可视化样本 - 适配PointBERT输入"""
     model.eval()
     
     vis_dir = os.path.join(output_dir, f'epoch_{epoch:03d}')
     os.makedirs(vis_dir, exist_ok=True)
     
     for idx, sample in enumerate(vis_samples):
-        sp_coords = sample['sp_coords'].unsqueeze(0).cuda()
-        xyz_full = [sample['xyz_full'].cuda()]
-        rgb_full = [sample['rgb_full'].cuda()]
-        sp_labels = [sample['sp_labels'].cuda()]
+        xyzrgb = sample['xyzrgb'].unsqueeze(0).cuda()  # (1, 8192, 6)
         
-        reconstruction, slots, masks, sp_feats_proj = model(
-            xyz_full, rgb_full, sp_labels, sp_coords
-        )
+        reconstruction, slots, masks, sp_feats_proj = model(xyzrgb)
+        
+        # 提取xyz用于可视化（需要从PointBERT的超点中心获取）
+        # 简化版：使用前512个点的坐标作为近似
+        xyz_sample = xyzrgb[0, :512, :3].cpu().numpy()
+        
+        # 生成伪sp_labels（每个超点对应一个点）
+        sp_labels_np = torch.arange(512).cpu().numpy()
         
         # 转换为numpy
-        xyz_np = xyz_full[0].cpu().numpy()
-        sp_labels_np = sp_labels[0].cpu().numpy()
         masks_np = masks[0].cpu().numpy()
         recon_np = reconstruction[0].cpu().numpy()
         sp_feats_np = sp_feats_proj[0].cpu().numpy()
         
         # 可视化
         visualize_slot_assignment(
-            xyz_np, sp_labels_np, masks_np,
+            xyz_sample, sp_labels_np, masks_np,
             os.path.join(vis_dir, f'sample_{idx}_slot_assignment.png'),
             num_slots=config['model']['num_slots']
         )
         
         visualize_reconstruction_error(
-            xyz_np, sp_labels_np, recon_np, sp_feats_np,
+            xyz_sample, sp_labels_np, recon_np, sp_feats_np,
             os.path.join(vis_dir, f'sample_{idx}_recon_error.png')
         )
         
@@ -376,8 +322,8 @@ def save_checkpoint(epoch, model, optimizer, scheduler, val_loss, config, output
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': {
-            'projector': model.projector.state_dict(),
-            'dinosaur': model.dinosaur.state_dict()
+            'projector': model.projector.state_dict() if hasattr(model, 'projector') else model.module.projector.state_dict(),
+            'dinosaur': model.dinosaur.state_dict() if hasattr(model, 'dinosaur') else model.module.dinosaur.state_dict()
         },
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
@@ -401,7 +347,7 @@ def save_checkpoint(epoch, model, optimizer, scheduler, val_loss, config, output
 def main():
     # 解析参数
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config/config_train_spformer.yaml')
+    parser.add_argument('--config', type=str, default='config/config_train_pointbert.yaml')
     parser.add_argument('--test_run', action='store_true', help='测试运行模式（仅2个epoch）')
     args = parser.parse_args()
     
@@ -430,12 +376,12 @@ def main():
     
     if rank == 0:
         print(f"\n{'='*60}")
-        print(f"DINOSAUR 3D训练 (SPFormer特征)")
+        print(f"DINOSAUR 3D训练 (PointBERT特征)")
         print(f"{'='*60}")
         print(f"配置: {args.config}")
         print(f"设备数: {world_size}")
         print(f"Slot数量: {config['model']['num_slots']}")
-        print(f"超点数量: {config['model']['num_points']}")
+        print(f"超点数量: {config['model']['pointbert_num_groups']}")
     
     # 创建输出目录
     output_dir = config['checkpoint']['output_dir']
@@ -450,21 +396,19 @@ def main():
         print(f"TensorBoard日志: {log_dir}")
     
     # 创建数据集
-    train_dataset = S3DISDataset(
+    train_dataset = S3DISPointBERTDataset(
         root_dir=config['data']['s3dis_root'],
         areas=config['data']['train_areas'],
-        n_superpoints=config['data']['n_superpoints'],
+        target_points=config['data']['target_points'],
         augment=True,
-        aug_config=config['augmentation'],
-        ignore_warnings=config.get('ignore_sklearn_warnings', True)
+        aug_config=config['augmentation']
     )
     
-    val_dataset = S3DISDataset(
+    val_dataset = S3DISPointBERTDataset(
         root_dir=config['data']['s3dis_root'],
         areas=config['data']['val_areas'],
-        n_superpoints=config['data']['n_superpoints'],
-        augment=False,
-        ignore_warnings=config.get('ignore_sklearn_warnings', True)
+        target_points=config['data']['target_points'],
+        augment=False
     )
     
     # 创建DataLoader
@@ -474,7 +418,7 @@ def main():
         shuffle=True,
         num_workers=config['train']['num_workers'],
         pin_memory=config['train']['pin_memory'],
-        collate_fn=collate_fn
+        collate_fn=collate_fn_pointbert
     )
     
     val_loader = DataLoader(
@@ -482,7 +426,7 @@ def main():
         batch_size=1,
         shuffle=False,
         num_workers=2,
-        collate_fn=collate_fn
+        collate_fn=collate_fn_pointbert
     )
     
     # 准备可视化样本
@@ -494,7 +438,7 @@ def main():
         print(f"  验证: {len(val_dataset)} 个房间")
     
     # 创建模型
-    model = create_model(config).cuda()
+    model = create_pointbert_dinosaur_model(config).cuda()
     
     if world_size > 1:
         model = nn.parallel.DistributedDataParallel(
@@ -532,7 +476,8 @@ def main():
     
     if rank == 0:
         print(f"\n模型创建完成")
-        print(f"可训练参数: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"可训练参数: {trainable_params:,}")
     
     # 训练循环
     best_val_loss = float('inf')

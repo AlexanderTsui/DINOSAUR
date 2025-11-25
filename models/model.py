@@ -306,7 +306,10 @@ class ISA(nn.Module):
             slots = self.norm(slots)
 
             # === key and value calculation using rel_grid (3D) ===
+            # 添加数值稳定性保护
             rel_grid = (abs_grid - S_p) / (S_s * self.sigma + 1e-8)  # (B, S, N, 3) - 3D相对坐标
+            rel_grid = torch.clamp(rel_grid, min=-10, max=10)        # 裁剪防止爆炸
+            
             k = self.f(self.K(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
             v = self.f(self.V(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
 
@@ -331,16 +334,23 @@ class ISA(nn.Module):
             values_ss = torch.pow(abs_grid - S_p, 2)                 # (B, S, N, 3)
             S_s = torch.einsum('bsjd,bsij->bsd', values_ss, attn)    # (B, S, N, 3) x (B, S, 1, N) -> (B, S, 3)
             S_s = torch.sqrt(S_s + 1e-8)                             # (B, S, 3) - 添加epsilon避免sqrt(0)
+            S_s = torch.clamp(S_s, min=1e-4, max=10.0)               # 限制尺度范围防止除0或爆炸
             S_s = S_s.unsqueeze(dim=2)                               # (B, S, 1, 3)
 
             # === Update slots (与坐标维度无关，保持不变) ===
             if t != self.iters:
+                # 添加NaN检查和数值裁剪
+                updates = torch.nan_to_num(updates, nan=0.0, posinf=1.0, neginf=-1.0)
+                
                 slots = self.gru(
                     updates.reshape(-1, self.slot_dim),
                     slots_prev.reshape(-1, self.slot_dim))
 
                 slots = slots.reshape(B, -1, self.slot_dim)
                 slots = self.mlp(slots)
+                
+                # 再次检查并修复NaN
+                slots = torch.nan_to_num(slots, nan=0.0, posinf=1.0, neginf=-1.0)
 
         slots = self.final_layer(slots_prev)                         # (B, S, D_slot)
         attn = attn.squeeze(dim=2)                                   # (B, S, N)
