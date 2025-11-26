@@ -174,7 +174,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
         'reconstruction': 0.0,
         'mask_entropy': 0.0,
         'slot_diversity': 0.0,
-        'mask_sparsity': 0.0
+        'mask_uniformity': 0.0
     }
     
     if rank == 0:
@@ -256,7 +256,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
                     writer.add_scalar('Train/reconstruction_loss', loss_dict['reconstruction'], global_step)
                     writer.add_scalar('Train/mask_entropy', loss_dict['mask_entropy'], global_step)
                     writer.add_scalar('Train/slot_diversity', loss_dict['slot_diversity'], global_step)
-                    writer.add_scalar('Train/mask_sparsity', loss_dict['mask_sparsity'], global_step)
+                    writer.add_scalar('Train/mask_uniformity', loss_dict['mask_uniformity'], global_step)
                     writer.add_scalar('Train/learning_rate', current_lr, global_step)
     
     # 平均损失
@@ -275,7 +275,6 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
         'reconstruction': 0.0,
         'mask_entropy': 0.0,
         'slot_diversity': 0.0,
-        'mask_sparsity': 0.0,
         'mask_uniformity': 0.0
     }
     
@@ -312,7 +311,6 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
         print(f"  重建损失: {avg_losses['reconstruction']:.6f}")
         print(f"  Mask熵损失: {avg_losses['mask_entropy']:.6f}")
         print(f"  Slot多样性损失: {avg_losses['slot_diversity']:.6f}")
-        print(f"  Mask稀疏性损失: {avg_losses['mask_sparsity']:.6f}")
         print(f"  Mask均匀性损失: {avg_losses['mask_uniformity']:.6f}")
         
         if writer is not None:
@@ -320,7 +318,6 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
             writer.add_scalar('Val/reconstruction_loss', avg_losses['reconstruction'], epoch)
             writer.add_scalar('Val/mask_entropy_loss', avg_losses['mask_entropy'], epoch)
             writer.add_scalar('Val/slot_diversity_loss', avg_losses['slot_diversity'], epoch)
-            writer.add_scalar('Val/mask_sparsity_loss', avg_losses['mask_sparsity'], epoch)
             writer.add_scalar('Val/mask_uniformity_loss', avg_losses['mask_uniformity'], epoch)
     
     return avg_losses['total']  # 返回总损失用于最佳模型判断

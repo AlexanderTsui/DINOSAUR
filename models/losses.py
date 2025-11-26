@@ -4,7 +4,7 @@ DINOSAUR 3D训练损失函数
 1. Reconstruction Loss (MSE)
 2. Mask Entropy Loss
 3. Slot Diversity Loss
-4. Mask Sparsity Loss
+4. Mask Uniformity Loss
 """
 
 import torch
@@ -24,7 +24,6 @@ class DINOSAURLoss(nn.Module):
                 - reconstruction
                 - mask_entropy
                 - slot_diversity
-                - mask_sparsity
                 - mask_uniformity  # 新增：mask均匀性损失权重
         """
         super().__init__()
@@ -32,7 +31,6 @@ class DINOSAURLoss(nn.Module):
         self.w_recon = loss_weights.get('reconstruction', 1.0)
         self.w_entropy = loss_weights.get('mask_entropy', 0.15)
         self.w_diversity = loss_weights.get('slot_diversity', 0.08)
-        self.w_sparsity = loss_weights.get('mask_sparsity', 0.05)
         self.w_uniformity = loss_weights.get('mask_uniformity', 0.3)  # 新增权重
         
         self.mse = nn.MSELoss()
@@ -104,18 +102,6 @@ class DINOSAURLoss(nn.Module):
         # 如果slot坍塌，相似度会接近1，损失会很大
         return similarity_off_diag.abs().mean()
     
-    def mask_sparsity_loss(self, masks):
-        """
-        Mask稀疏性损失 - 鼓励稀疏分配
-        
-        Args:
-            masks: (B, S, N)
-        
-        使用L1范数鼓励大部分mask值接近0或1
-        注：空slot的mask全为0也是合理的，不需要特殊处理
-        """
-        return masks.abs().mean()
-    
     def mask_uniformity_loss(self, masks):
         """
         Mask均匀性损失 - 防止所有点塌缩到单个slot
@@ -186,7 +172,6 @@ class DINOSAURLoss(nn.Module):
         loss_recon = self.reconstruction_loss(reconstruction, sp_feats_proj)
         loss_entropy = self.mask_entropy_loss(masks)
         loss_diversity = self.slot_diversity_loss(slots)
-        loss_sparsity = self.mask_sparsity_loss(masks)
         loss_uniformity = self.mask_uniformity_loss(masks)  # 新增
         
         # 加权求和
@@ -194,7 +179,6 @@ class DINOSAURLoss(nn.Module):
             self.w_recon * loss_recon +
             self.w_entropy * loss_entropy +
             self.w_diversity * loss_diversity +
-            self.w_sparsity * loss_sparsity +
             self.w_uniformity * loss_uniformity  # 新增
         )
         
@@ -204,7 +188,6 @@ class DINOSAURLoss(nn.Module):
             'reconstruction': loss_recon.item(),
             'mask_entropy': loss_entropy.item(),
             'slot_diversity': loss_diversity.item(),
-            'mask_sparsity': loss_sparsity.item(),
             'mask_uniformity': loss_uniformity.item()  # 新增
         }
         

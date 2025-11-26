@@ -77,8 +77,7 @@ loss:
     reconstruction: 1.0           # w1: MSE重建损失权重
     mask_entropy: 0.2            # w2: Mask熵正则（鼓励确定性分配）
     slot_diversity: 0.2           # w3: Slot多样性损失（防止坍缩）
-    mask_sparsity: 0.05           # w4: Mask稀疏性损失
-    mask_uniformity: 0.5         # w5: Mask均匀性损失（防止所有点塌缩到单个slot）
+    mask_uniformity: 0.2         # w4: Mask均匀性损失（防止所有点塌缩到单个slot）
 
 # ==================== 数据增强 ====================
 augmentation:
@@ -99,21 +98,22 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_pointbert
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_pointbert/03
   save_interval: 5                # 保存间隔（epochs）
   keep_checkpoint_max: 5          # 最多保留checkpoint数量
 
+# ==================== 可视化配置 ====================
+visualization:
+  save_html: True                 # 是否生成交互式HTML
+  html_point_size: 2.0            # HTML中原始点云的点大小
+  html_slot_point_size: 4.0       # HTML中slot点大小
+
 # ==================== 其他配置 ====================
-seed: 1999
+seed: 42
 device: cuda
-gpu_ids: [5, 6]                   # 使用的GPU ID（物理GPU 1和3）
+gpu_ids: [4, 7]                   # 使用的GPU ID（物理GPU 1和3）
 log_interval: 10                  # 日志打印间隔（iterations）
 vis_interval: 500                 # 可视化间隔（iterations）
 
-# ==================== 说明 ====================
-# 与SPFormer版本的主要差异:
-# 1. batch_size 从8降到6（PointBERT ViT-G更大）
-# 2. warmup_epochs 从8增到10（更强的特征需要更多warmup）
-# 3. 数据处理更简单（不需要预计算超点标签）
-# 4. 特征维度 384 vs 32（投影层负担更重）
+
 

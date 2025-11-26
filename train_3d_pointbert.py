@@ -15,6 +15,7 @@ import sys
 import time
 import argparse
 import yaml
+import numpy as np
 from datetime import datetime
 
 import torch
@@ -33,6 +34,15 @@ except ImportError:
     HAS_TENSORBOARD = False
     SummaryWriter = None
 
+# Plotly（生成交互式HTML）
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from plotly.colors import qualitative as plotly_qualitative
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+
 # 添加路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
@@ -46,6 +56,100 @@ from models.losses import DINOSAURLoss
 # 导入可视化工具
 sys.path.insert(0, os.path.join(current_dir, 'utils'))
 from visualizer import visualize_slot_assignment, visualize_reconstruction_error, visualize_slot_statistics
+
+
+def _rgb_to_plotly_colors(rgb_array: np.ndarray):
+    """将归一化RGB转换为Plotly支持的'rgb(r,g,b)'字符串列表。"""
+    if rgb_array.size == 0:
+        return []
+    
+    rgb = np.asarray(rgb_array, dtype=np.float32)
+    if rgb.min() < 0:
+        rgb = (rgb + 1.0) / 2.0  # [-1,1] -> [0,1]
+    rgb = np.clip(rgb, 0.0, 1.0)
+    rgb_int = (rgb * 255).astype(np.uint8)
+    return [f'rgb({r},{g},{b})' for r, g, b in rgb_int]
+
+
+def save_slot_assignment_html(original_xyz, original_rgb, slot_xyz, slot_assignments,
+                              num_slots, output_path, point_size=2.0, slot_size=4.0):
+    """生成交互式3D HTML，左侧原始点云，右侧slot绑定结果。"""
+    if not HAS_PLOTLY:
+        print("[可视化] 未检测到Plotly，跳过HTML生成")
+        return
+    
+    if original_xyz.size == 0 or slot_xyz.size == 0:
+        print("[可视化] 数据为空，跳过HTML生成")
+        return
+    
+    # 原始点云颜色
+    orig_colors = _rgb_to_plotly_colors(original_rgb)
+    
+    # Slot颜色（重复使用调色板）
+    color_palette = getattr(plotly_qualitative, 'Dark24', plotly_qualitative.Plotly)
+    repeats = (num_slots + len(color_palette) - 1) // len(color_palette)
+    expanded_palette = (color_palette * repeats)[:num_slots]
+    slot_assignments = np.asarray(slot_assignments, dtype=np.int64)
+    slot_point_colors = [expanded_palette[int(idx)] for idx in slot_assignments]
+    
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        specs=[[{'type': 'scene'}, {'type': 'scene'}]],
+        subplot_titles=('Original Point Cloud', 'Slot Assignments')
+    )
+    
+    fig.add_trace(
+        go.Scatter3d(
+            x=original_xyz[:, 0],
+            y=original_xyz[:, 1],
+            z=original_xyz[:, 2],
+            mode='markers',
+            marker=dict(
+                size=point_size,
+                color=orig_colors,
+                opacity=0.85
+            ),
+            name='Input'
+        ),
+        row=1,
+        col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter3d(
+            x=slot_xyz[:, 0],
+            y=slot_xyz[:, 1],
+            z=slot_xyz[:, 2],
+            mode='markers',
+            marker=dict(
+                size=slot_size,
+                color=slot_point_colors,
+                opacity=0.9
+            ),
+            name='Slots'
+        ),
+        row=1,
+        col=2
+    )
+    
+    scene_layout = dict(
+        xaxis=dict(title='X'),
+        yaxis=dict(title='Y'),
+        zaxis=dict(title='Z'),
+        aspectmode='data'
+    )
+    fig.update_layout(
+        height=600,
+        width=1200,
+        template='plotly_white',
+        showlegend=False,
+    )
+    fig.update_scenes(scene_layout, row=1, col=1)
+    fig.update_scenes(scene_layout, row=1, col=2)
+    
+    fig.write_html(output_path)
+    print(f"[可视化] HTML已保存: {output_path}")
 
 
 def load_config(config_path):
@@ -80,7 +184,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
         'reconstruction': 0.0,
         'mask_entropy': 0.0,
         'slot_diversity': 0.0,
-        'mask_sparsity': 0.0
+        'mask_uniformity': 0.0
     }
     
     if rank == 0:
@@ -207,7 +311,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
                     writer.add_scalar('Train/reconstruction_loss', loss_dict['reconstruction'], global_step)
                     writer.add_scalar('Train/mask_entropy', loss_dict['mask_entropy'], global_step)
                     writer.add_scalar('Train/slot_diversity', loss_dict['slot_diversity'], global_step)
-                    writer.add_scalar('Train/mask_sparsity', loss_dict['mask_sparsity'], global_step)
+                    writer.add_scalar('Train/mask_uniformity', loss_dict['mask_uniformity'], global_step)
                     writer.add_scalar('Train/learning_rate', current_lr, global_step)
     
     # 平均损失
@@ -226,7 +330,6 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
         'reconstruction': 0.0,
         'mask_entropy': 0.0,
         'slot_diversity': 0.0,
-        'mask_sparsity': 0.0,
         'mask_uniformity': 0.0
     }
     
@@ -258,7 +361,6 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
         print(f"  重建损失: {avg_losses['reconstruction']:.6f}")
         print(f"  Mask熵损失: {avg_losses['mask_entropy']:.6f}")
         print(f"  Slot多样性损失: {avg_losses['slot_diversity']:.6f}")
-        print(f"  Mask稀疏性损失: {avg_losses['mask_sparsity']:.6f}")
         print(f"  Mask均匀性损失: {avg_losses['mask_uniformity']:.6f}")
         
         if writer is not None:
@@ -266,7 +368,6 @@ def validate(model, val_loader, criterion, epoch, config, writer, rank):
             writer.add_scalar('Val/reconstruction_loss', avg_losses['reconstruction'], epoch)
             writer.add_scalar('Val/mask_entropy_loss', avg_losses['mask_entropy'], epoch)
             writer.add_scalar('Val/slot_diversity_loss', avg_losses['slot_diversity'], epoch)
-            writer.add_scalar('Val/mask_sparsity_loss', avg_losses['mask_sparsity'], epoch)
             writer.add_scalar('Val/mask_uniformity_loss', avg_losses['mask_uniformity'], epoch)
     
     return avg_losses['total']  # 返回总损失用于最佳模型判断
@@ -285,17 +386,19 @@ def visualize_samples(model, vis_samples, epoch, config, output_dir):
         
         reconstruction, slots, masks, sp_feats_proj = model(xyzrgb)
         
-        # 提取xyz用于可视化（需要从PointBERT的超点中心获取）
-        # 简化版：使用前512个点的坐标作为近似
-        xyz_sample = xyzrgb[0, :512, :3].cpu().numpy()
+        # 提取xyz用于可视化（PointBERT输出的超点对应前N个坐标）
+        num_superpoints = masks.shape[-1]
+        xyz_sample = xyzrgb[0, :num_superpoints, :3].cpu().numpy()
+        sp_labels_np = torch.arange(num_superpoints).cpu().numpy()
         
-        # 生成伪sp_labels（每个超点对应一个点）
-        sp_labels_np = torch.arange(512).cpu().numpy()
+        xyz_full = xyzrgb[0, :, :3].cpu().numpy()
+        rgb_full = xyzrgb[0, :, 3:6].cpu().numpy()
         
         # 转换为numpy
         masks_np = masks[0].cpu().numpy()
         recon_np = reconstruction[0].cpu().numpy()
         sp_feats_np = sp_feats_proj[0].cpu().numpy()
+        slot_assignments = np.argmax(masks_np, axis=0)
         
         # 可视化
         visualize_slot_assignment(
@@ -313,6 +416,20 @@ def visualize_samples(model, vis_samples, epoch, config, output_dir):
             masks_np,
             os.path.join(vis_dir, f'sample_{idx}_slot_stats.png')
         )
+        
+        vis_cfg = config.get('visualization', {})
+        if vis_cfg.get('save_html', False):
+            html_path = os.path.join(vis_dir, f'sample_{idx}_slot_assignment.html')
+            save_slot_assignment_html(
+                xyz_full,
+                rgb_full,
+                xyz_sample,
+                slot_assignments,
+                config['model']['num_slots'],
+                html_path,
+                point_size=vis_cfg.get('html_point_size', 2.0),
+                slot_size=vis_cfg.get('html_slot_point_size', 4.0)
+            )
     
     print(f"✓ 可视化已保存到: {vis_dir}")
 
@@ -541,5 +658,35 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # 单机多卡训练：如果未通过torchrun启动，自动重启
+    if 'RANK' not in os.environ:
+        import shutil
+        script_path = os.path.abspath(__file__)
+        
+        # 从配置文件读取GPU数量
+        try:
+            config_path = 'config/config_train_pointbert.yaml'
+            for i, arg in enumerate(sys.argv[1:]):
+                if arg == '--config' and i + 1 < len(sys.argv):
+                    config_path = sys.argv[i + 2]
+                    break
+            config = load_config(os.path.join(current_dir, config_path))
+            nproc = len(config.get('gpu_ids', [])) or 'auto'
+        except:
+            nproc = 'auto'
+        
+        # 优先使用conda环境中的torchrun（确保使用正确的Python环境）
+        conda_env_path = '/home/pbw/data1/.conda/envs/CloudPoints'
+        torchrun_path = os.path.join(conda_env_path, 'bin/torchrun')
+        
+        if os.path.exists(torchrun_path):
+            cmd = [torchrun_path, '--standalone', f'--nproc-per-node={nproc}', script_path] + sys.argv[1:]
+            os.execv(torchrun_path, cmd)
+        else:
+            # fallback: 使用conda run（确保使用正确的环境）
+            cmd = ['conda', 'run', '-n', 'CloudPoints', 'torchrun', 
+                   '--standalone', f'--nproc-per-node={nproc}', script_path] + sys.argv[1:]
+            os.execvp('conda', cmd)
+    else:
+        main()
 

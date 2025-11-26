@@ -74,8 +74,7 @@ loss:
     reconstruction: 1.0         # w1: MSE重建损失权重
     mask_entropy: 0.4          # w2: Mask熵正则（鼓励确定性分配）
     slot_diversity: 0.4        # w3: Slot多样性损失（防止坍缩）
-    mask_sparsity: 0.05         # w4: Mask稀疏性损失
-    mask_uniformity: 0.5       # w5: Mask均匀性损失（防止所有点塌缩到单个slot）
+    mask_uniformity: 0.5       # w4: Mask均匀性损失（防止所有点塌缩到单个slot）
 
 # ==================== 数据增强 ====================
 augmentation:
@@ -102,6 +101,12 @@ checkpoint:
 validation:
   val_interval: 3               # 验证间隔（每N个epoch进行一次验证，记录所有损失项）
   early_stopping_patience: 25   # 早停patience（基于验证总损失）
+
+# ==================== 可视化配置 ====================
+visualization:
+  save_html: True               # 是否生成交互式HTML
+  html_point_size: 2.0          # HTML中原始点云的点大小
+  html_slot_point_size: 4.0     # HTML中slot点大小
 
 # ==================== 数据路径 ====================
 data:
