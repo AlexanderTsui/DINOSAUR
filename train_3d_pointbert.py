@@ -179,6 +179,20 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
     """训练一个epoch"""
     model.train()
     
+    # 预缓存可训练参数（用于梯度检测和裁剪）
+    if hasattr(model, 'get_trainable_params'):
+        trainable_params = model.get_trainable_params()
+        named_trainable_params = [
+            (name, param) for name, param in model.named_parameters()
+            if param.requires_grad
+        ]
+    else:
+        trainable_params = model.module.get_trainable_params()
+        named_trainable_params = [
+            (name, param) for name, param in model.module.named_parameters()
+            if param.requires_grad
+        ]
+    
     total_losses = {
         'total': 0.0,
         'reconstruction': 0.0,
@@ -248,41 +262,62 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, ep
         except RuntimeError as e:
             print(f"[错误] Epoch {epoch}, Iter {iter_idx}: 反向传播失败: {e}")
             optimizer.zero_grad()
-            scaler.update()
+            # 不调用scaler.update()，避免"No inf checks were recorded"错误
+            # scaler会在下一次成功的step后自动更新
             continue
         
         # Unscale梯度用于裁剪
         scaler.unscale_(optimizer)
         
         # 检查梯度中的NaN/Inf（在裁剪之前）
-        model_params = model.get_trainable_params() if hasattr(model, 'get_trainable_params') else model.module.get_trainable_params()
-        has_grad_nan = any(torch.isnan(p.grad).any() if p.grad is not None else False for p in model_params)
-        has_grad_inf = any(torch.isinf(p.grad).any() if p.grad is not None else False for p in model_params)
+        has_grad_nan = any(torch.isnan(p.grad).any() if p.grad is not None else False for p in trainable_params)
+        has_grad_inf = any(torch.isinf(p.grad).any() if p.grad is not None else False for p in trainable_params)
         
         if has_grad_nan or has_grad_inf:
             print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 梯度包含NaN/Inf (NaN={has_grad_nan}, Inf={has_grad_inf})，跳过更新")
+            
+            if rank == 0 and config['train'].get('log_grad_details_on_nan', True):
+                max_report = config['train'].get('grad_debug_max_params', 5)
+                reported = 0
+                details = []
+                for name, param in named_trainable_params:
+                    if param.grad is None:
+                        continue
+                    grad = param.grad
+                    grad_nan = torch.isnan(grad).any()
+                    grad_inf = torch.isinf(grad).any()
+                    if grad_nan or grad_inf:
+                        grad_abs = torch.nan_to_num(grad.detach(), nan=0.0, posinf=0.0, neginf=0.0).abs()
+                        grad_max = grad_abs.max().item() if grad_abs.numel() > 0 else 0.0
+                        details.append(f"{name} | max|grad|={grad_max:.2e} | NaN={grad_nan} | Inf={grad_inf}")
+                        reported += 1
+                        if reported >= max_report:
+                            break
+                if details:
+                    print("[调试] 异常梯度参数:")
+                    for line in details:
+                        print(f"  - {line}")
             optimizer.zero_grad()
-            scaler.update()
+            # 不调用scaler.update()，让scaler在下一次正常step后更新
             continue
         
         # 梯度裁剪并记录
         try:
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                model_params,
+                trainable_params,
                 config['train']['grad_clip_norm']
             )
         except RuntimeError as e:
             print(f"[错误] Epoch {epoch}, Iter {iter_idx}: 梯度裁剪失败: {e}")
             optimizer.zero_grad()
-            scaler.update()
+            # 不调用scaler.update()，让scaler在下一次正常step后更新
             continue
         
         # 检查梯度异常
         if torch.isnan(grad_norm) or torch.isinf(grad_norm) or grad_norm > 100:
             print(f"[警告] Epoch {epoch}, Iter {iter_idx}: 梯度异常 (norm={grad_norm})，跳过更新")
-            # 重置scaler状态
             optimizer.zero_grad()
-            scaler.update()  # 更新scaler状态
+            # 不调用scaler.update()，让scaler在下一次正常step后更新
             continue
         
         # 优化器步进
@@ -491,6 +526,11 @@ def main():
     # 分布式设置
     rank, world_size, local_rank = setup_distributed()
     
+    if config['train'].get('detect_anomaly', False):
+        torch.autograd.set_detect_anomaly(True)
+        if rank == 0:
+            print("[调试] 已启用Autograd异常检测")
+    
     if rank == 0:
         print(f"\n{'='*60}")
         print(f"DINOSAUR 3D训练 (PointBERT特征)")
@@ -509,6 +549,7 @@ def main():
     writer = None
     if rank == 0 and HAS_TENSORBOARD:
         log_dir = os.path.join(output_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)  # 确保日志目录存在
         writer = SummaryWriter(log_dir)
         print(f"TensorBoard日志: {log_dir}")
     
@@ -529,14 +570,18 @@ def main():
     )
     
     # 创建DataLoader
-    train_loader = DataLoader(
-        train_dataset,
+    # 训练集 DataLoader 参数（支持常驻worker与预取）
+    train_loader_kwargs = dict(
         batch_size=config['train']['batch_size_per_gpu'],
         shuffle=True,
         num_workers=config['train']['num_workers'],
         pin_memory=config['train']['pin_memory'],
         collate_fn=collate_fn_pointbert
     )
+    if config['train']['num_workers'] > 0:
+        train_loader_kwargs['persistent_workers'] = config['train'].get('persistent_workers', False)
+        train_loader_kwargs['prefetch_factor'] = config['train'].get('prefetch_factor', 2)
+    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
     
     val_loader = DataLoader(
         val_dataset,

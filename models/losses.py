@@ -74,33 +74,40 @@ class DINOSAURLoss(nn.Module):
     
     def slot_diversity_loss(self, slots):
         """
-        Slot多样性损失 - 防止Slot坍塌到相同表示
+        Slot多样性损失 - 使用余弦相似度并增加数值稳定处理
         
         Args:
             slots: (B, S, D_slot)
-        
-        计算Slot之间的余弦相似度，惩罚过高的相似度
-        改进：即使slot为空也计算，通过添加小噪声避免除0
         """
         B, S, D = slots.shape
         
-        # 添加小噪声避免完全为0的slot导致归一化问题
-        # 这样即使slot为空，也能计算相似度（空slot之间相似度会很高，会被惩罚）
-        slots_safe = slots + torch.randn_like(slots) * 1e-6
+        # L2归一化时显式裁剪范数，避免除零导致的NaN
+        slot_norm = slots.norm(dim=-1, keepdim=True)  # (B, S, 1)
+        safe_norm = torch.clamp(slot_norm, min=1e-6)
+        slots_normalized = slots / safe_norm
+        slots_normalized = torch.where(
+            slot_norm > 1e-6,
+            slots_normalized,
+            torch.zeros_like(slots_normalized)
+        )
         
-        # L2归一化（添加eps防止除0）
-        slots_norm = F.normalize(slots_safe, p=2, dim=-1, eps=1e-8)  # (B, S, D)
+        # 计算余弦相似度矩阵并过滤无效值
+        cos_sim = torch.matmul(slots_normalized, slots_normalized.transpose(1, 2))  # (B, S, S)
+        cos_sim = cos_sim.clamp(-1.0 + 1e-4, 1.0 - 1e-4)
+        cos_sim = torch.nan_to_num(cos_sim, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # 计算相似度矩阵
-        similarity = torch.bmm(slots_norm, slots_norm.transpose(1, 2))  # (B, S, S)
+        # 去掉对角元素，仅约束不同slot之间的相似度
+        eye = torch.eye(S, device=slots.device).unsqueeze(0)  # (1, S, S)
+        cos_off_diag = cos_sim * (1 - eye)
         
-        # 去除对角线（自己和自己的相似度）
-        mask = ~torch.eye(S, dtype=torch.bool, device=slots.device).unsqueeze(0).expand(B, S, S)
-        similarity_off_diag = similarity[mask].reshape(B, S, S-1)
+        # 只惩罚正相似度，鼓励slot正交分布
+        loss = F.relu(cos_off_diag).pow(2).mean()
         
-        # 惩罚高相似度（希望slot彼此不同）
-        # 如果slot坍塌，相似度会接近1，损失会很大
-        return similarity_off_diag.abs().mean()
+        if torch.isnan(loss) or torch.isinf(loss):
+            print("[警告] slot_diversity_loss: 损失为NaN/Inf，返回零损失")
+            return torch.tensor(0.0, device=slots.device, requires_grad=True)
+        
+        return loss
     
     def mask_uniformity_loss(self, masks):
         """

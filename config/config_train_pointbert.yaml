@@ -15,9 +15,9 @@ model:
     out_dim: 768                  # DINOSAUR输入
   
   # DINOSAUR配置
-  num_slots: 7                   # Slot数量（略微过分割）
+  num_slots: 5                   # Slot数量（略微过分割）
   slot_dim: 256                   # Slot维度
-  slot_att_iter: 3                # Slot Attention迭代次数
+  slot_att_iter: 5                # Slot Attention迭代次数
   query_opt: True                 # 使用可学习的slot初始化
   ISA: True                       # 使用Invariant Slot Attention
   token_num: 512                  # Token数量（与超点数一致）
@@ -55,6 +55,11 @@ train:
   # 梯度相关
   grad_clip_norm: 0.5             # 梯度裁剪
   use_amp: True                   # 混合精度训练
+  detect_anomaly: True            # 启用autograd异常检测（调试NaN问题）
+  log_grad_details_on_nan: True   # 当出现NaN梯度时打印参数详情
+  grad_debug_max_params: 5        # 打印出现异常梯度的参数数量上限
+  persistent_workers: True        # DataLoader在epoch之间保持worker常驻，减少首batch等待
+  prefetch_factor: 2              # 每个worker预取的batch数（仅在num_workers>0时生效）
   
   # 冻结策略
   freeze_pointbert: True          # 冻结PointBERT
@@ -62,7 +67,7 @@ train:
   
   # 优化器
   optimizer:
-    lr: 0.0001                    # 学习率（可能需要调整）
+    lr: 0.00005                   # 学习率（5e-5，降低以提高数值稳定性）
     weight_decay: 0.05            # 权重衰减
     betas: [0.9, 0.999]           # Adam beta参数
   
@@ -75,9 +80,9 @@ train:
 loss:
   weights:
     reconstruction: 1.0           # w1: MSE重建损失权重
-    mask_entropy: 0.2            # w2: Mask熵正则（鼓励确定性分配）
-    slot_diversity: 0.2           # w3: Slot多样性损失（防止坍缩）
-    mask_uniformity: 0.2         # w4: Mask均匀性损失（防止所有点塌缩到单个slot）
+    mask_entropy: 0.1            # w2: Mask熵正则（鼓励确定性分配）
+    slot_diversity: 0.05           # w3: Slot多样性损失（使用方差版本，数值稳定）
+    mask_uniformity: 0.1         # w4: Mask均匀性损失（防止所有点塌缩到单个slot）
 
 # ==================== 数据增强 ====================
 augmentation:
@@ -98,8 +103,8 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_pointbert/03
-  save_interval: 5                # 保存间隔（epochs）
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_pointbert/04
+  save_interval: 10                # 保存间隔（epochs）
   keep_checkpoint_max: 5          # 最多保留checkpoint数量
 
 # ==================== 可视化配置 ====================
@@ -111,7 +116,7 @@ visualization:
 # ==================== 其他配置 ====================
 seed: 42
 device: cuda
-gpu_ids: [4, 7]                   # 使用的GPU ID（物理GPU 1和3）
+gpu_ids: [4, 5]                   # 使用的GPU ID（物理GPU 1和3）
 log_interval: 10                  # 日志打印间隔（iterations）
 vis_interval: 500                 # 可视化间隔（iterations）
 

@@ -197,7 +197,8 @@ class ISA(nn.Module):
         self.S_s = nn.Parameter(torch.Tensor(1, self.num_slots, 1, 3))  # (1, S, 1, 3) - 3D尺度
         self.S_p = nn.Parameter(torch.Tensor(1, self.num_slots, 1, 3))  # (1, S, 1, 3) - 3D位置
 
-        init.normal_(self.S_s, mean=0., std=.02)
+        # 增大S_s初始值,避免除以过小的数导致数值爆炸
+        init.normal_(self.S_s, mean=0.5, std=0.1)  # 从mean=0增加到0.5
         init.normal_(self.S_p, mean=0., std=.02)
         # === === ===
 
@@ -279,6 +280,8 @@ class ISA(nn.Module):
         
         # 预处理输入特征
         inputs = self.initial_mlp(inputs).unsqueeze(dim=1)          # (B, 1, N, D_slot)
+        # 检查并修复initial_mlp输出的NaN
+        inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1.0, neginf=-1.0)
         inputs = inputs.expand(B, S, N, D_slot)                     # (B, S, N, D_slot)
 
         # 构建3D abs_grid：从输入的点云坐标
@@ -286,6 +289,7 @@ class ISA(nn.Module):
         abs_grid = abs_grid.expand(B, S, N, 3)                      # (B, S, N, 3)
 
         assert torch.sum(torch.isnan(abs_grid)) == 0, "abs_grid包含NaN"
+        assert torch.sum(torch.isnan(inputs)) == 0, "inputs包含NaN"
 
         # 初始化slot参考坐标系（3D）
         S_s = self.S_s.expand(B, S, 1, 3)                           # (B, S, 1, 3)
@@ -307,8 +311,10 @@ class ISA(nn.Module):
 
             # === key and value calculation using rel_grid (3D) ===
             # 添加数值稳定性保护
-            rel_grid = (abs_grid - S_p) / (S_s * self.sigma + 1e-8)  # (B, S, N, 3) - 3D相对坐标
-            rel_grid = torch.clamp(rel_grid, min=-10, max=10)        # 裁剪防止爆炸
+            # 确保S_s不会过小
+            S_s_safe = torch.clamp(S_s, min=0.1, max=10.0)           # 限制S_s范围
+            rel_grid = (abs_grid - S_p) / (S_s_safe * self.sigma + 1e-6)  # (B, S, N, 3) - 3D相对坐标
+            rel_grid = torch.clamp(rel_grid, min=-5, max=5)          # 更严格的裁剪防止爆炸
             
             k = self.f(self.K(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
             v = self.f(self.V(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
@@ -318,6 +324,8 @@ class ISA(nn.Module):
 
             dots = torch.einsum('bsdi,bsjd->bsj', q, k)              # (B, S, D_slot, 1) x (B, S, N, D_slot) -> (B, S, N)
             dots *=  self.scale                                      # (B, S, N)
+            # 裁剪dots防止softmax溢出
+            dots = torch.clamp(dots, min=-50, max=50)
             attn = dots.softmax(dim=1) + epsilon                     # (B, S, N) - softmax over slots
 
             # === Weighted mean ===

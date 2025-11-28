@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import glob
+import pickle
 
 
 class S3DISPointBERTDataset(Dataset):
@@ -49,32 +50,42 @@ class S3DISPointBERTDataset(Dataset):
         self.augment = augment
         self.aug_config = aug_config or {}
         
-        # 加载所有房间文件
-        self.room_files = []
-        for area in areas:
-            area_path = os.path.join(root_dir, f'Area_{area}')
-            if not os.path.exists(area_path):
-                print(f"[Warning] Area {area} 不存在: {area_path}")
-                continue
-            
-            # 查找所有房间txt文件
-            pattern = os.path.join(area_path, '*', '*.txt')
-            area_files = glob.glob(pattern)
-            
-            # 过滤有效文件（排除ReadMe和Annotations）
-            for f in area_files:
-                if 'ReadMe' in f or 'Annotations' in f:
+        # 使用缓存文件加速加载
+        cache_filename = f"s3dis_pointbert_areas_{'_'.join(map(str, sorted(areas)))}.pkl"
+        cache_path = os.path.join(root_dir, cache_filename)
+        
+        if os.path.exists(cache_path):
+            print(f"[S3DIS-PointBERT] 从缓存加载文件列表: {cache_path}")
+            with open(cache_path, 'rb') as f:
+                self.room_files = pickle.load(f)
+        else:
+            print("[S3DIS-PointBERT] 正在扫描文件列表 (首次运行)...")
+            self.room_files = []
+            for area in areas:
+                area_path = os.path.join(root_dir, f'Area_{area}')
+                if not os.path.exists(area_path):
+                    print(f"[Warning] Area {area} 不存在: {area_path}")
                     continue
-                # 确保文件名与父目录名一致（S3DIS规范）
-                parent_name = os.path.basename(os.path.dirname(f))
-                file_name = os.path.basename(f).replace('.txt', '')
-                if parent_name == file_name:
-                    self.room_files.append(f)
+                
+                pattern = os.path.join(area_path, '*', '*.txt')
+                area_files = glob.glob(pattern)
+                
+                for f in area_files:
+                    if 'ReadMe' in f or 'Annotations' in f:
+                        continue
+                    parent_name = os.path.basename(os.path.dirname(f))
+                    file_name = os.path.basename(f).replace('.txt', '')
+                    if parent_name == file_name:
+                        self.room_files.append(f)
+            
+            print(f"[S3DIS-PointBERT] 扫描完成，正在保存缓存: {cache_path}")
+            with open(cache_path, 'wb') as f:
+                pickle.dump(self.room_files, f)
         
         if len(self.room_files) == 0:
             raise ValueError(f"未找到有效的S3DIS房间文件！检查路径: {root_dir}")
         
-        print(f"[S3DIS-PointBERT] 加载 {len(self.room_files)} 个房间 (Areas: {areas})")
+        print(f"[S3DIS-PointBERT] 找到 {len(self.room_files)} 个房间 (Areas: {areas})")
     
     def __len__(self):
         return len(self.room_files)
