@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(current_dir, '../SPFormer'))
 # 导入自定义模块
 from data.s3dis_dataset import S3DISDataset, collate_fn
 from models.model import DINOSAURpp
-from models.wrapper import FeatureProjector, SPFormerDINOSAUR
+from models.spformer_wrapper import FeatureProjector, SPFormerDINOSAUR
 from models.losses import DINOSAURLoss
 
 # 导入可视化工具（使用完整路径避免与原utils.py冲突）
