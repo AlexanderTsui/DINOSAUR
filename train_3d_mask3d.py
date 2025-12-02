@@ -5,7 +5,7 @@ DINOSAUR 3D训练脚本 (Mask3D特征输入)
 1. S3DIS数据加载 → 重采样到80000点
 2. Mask3D提取点级特征f_point (冻结)
 3. FPS采样固定数量超点
-4. 特征投影 96→256维
+4. 特征投影 96→768维
 5. DINOSAUR ISA处理
 6. 4项损失计算
 7. TensorBoard监控 + HTML可视化

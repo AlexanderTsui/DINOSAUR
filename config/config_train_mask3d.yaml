@@ -39,11 +39,11 @@ train:
   prefetch_factor: 2                # 每个worker预取的batch数
   
   # 训练轮次
-  epochs: 100
+  epochs: 200
   warmup_epochs: 5                  # Warmup轮次
   
   # 梯度相关
-  grad_clip_norm: 1.0               # 梯度裁剪
+  grad_clip_norm: 0.5               # 梯度裁剪（降低阈值防止梯度爆炸）
   use_amp: True                     # 混合精度训练
   detect_anomaly: False             # 启用autograd异常检测（调试时开启）
   log_grad_details_on_nan: True     # 当出现NaN梯度时打印参数详情
@@ -58,7 +58,7 @@ train:
   # 学习率调度器
   scheduler:
     type: "poly"                    # poly衰减
-    power: 0.9                      # 衰减指数
+    power: 1.2                      # 衰减指数（增大使学习率下降更快，减少中后期NaN）
 
 # ==================== 损失函数权重 ====================
 loss:
@@ -87,7 +87,7 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/03
   save_interval: 5                 # 保存间隔（epochs）
   keep_checkpoint_max: 5            # 最多保留checkpoint数量
 
@@ -101,6 +101,6 @@ visualization:
 # ==================== 其他配置 ====================
 seed: 42
 device: cuda
-gpu_ids: [0,4]                        # 使用的GPU ID
+gpu_ids: [3, 5]                        # 使用的GPU ID
 log_interval: 20                    # 日志打印间隔（iterations）
 

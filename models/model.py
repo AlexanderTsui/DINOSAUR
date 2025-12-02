@@ -16,8 +16,6 @@ class Loss_Function(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.mse = nn.MSELoss(reduction="none")
-
-
         self.token_num = args.token_num
         self.num_slots = args.num_slots
 
@@ -249,8 +247,10 @@ class ISA(nn.Module):
         S_s = torch.sqrt(S_s)                                                   # (B, S, 3)
         S_s = S_s.unsqueeze(dim=2)                                              # (B, S, 1, 3)
 
-        # 归一化得到相对坐标（3D）
-        rel_grid = (abs_grid - S_p) / (S_s * self.sigma + 1e-8)                 # (B, S, N, 3)
+        # 归一化得到相对坐标（3D）- 添加数值稳定性保护
+        S_s_safe = torch.clamp(S_s, min=0.2) + 0.1                              # 确保S_s不会太小
+        rel_grid = (abs_grid - S_p) / (S_s_safe * self.sigma + 1e-6)            # (B, S, N, 3)
+        rel_grid = torch.clamp(rel_grid, min=-3, max=3)                         # 防止极端值
         rel_grid = self.h(rel_grid)                                             # (B, S, N, D_slot) - 通过MLP编码
 
         return rel_grid
@@ -311,10 +311,10 @@ class ISA(nn.Module):
 
             # === key and value calculation using rel_grid (3D) ===
             # 添加数值稳定性保护
-            # 确保S_s不会过小
-            S_s_safe = torch.clamp(S_s, min=0.1, max=10.0)           # 限制S_s范围
-            rel_grid = (abs_grid - S_p) / (S_s_safe * self.sigma + 1e-6)  # (B, S, N, 3) - 3D相对坐标
-            rel_grid = torch.clamp(rel_grid, min=-5, max=5)          # 更严格的裁剪防止爆炸
+            # 确保S_s不会过小（增大下限+偏移，防止训练中后期S_s收敛到0导致梯度爆炸）
+            S_s_safe = torch.clamp(S_s, min=0.3, max=5.0) + 0.1      # 更保守的范围+偏移
+            rel_grid = (abs_grid - S_p) / (S_s_safe * self.sigma + 1e-4)  # (B, S, N, 3) - 3D相对坐标
+            rel_grid = torch.clamp(rel_grid, min=-3, max=3)          # 更严格的裁剪防止爆炸
             
             k = self.f(self.K(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
             v = self.f(self.V(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
@@ -323,9 +323,9 @@ class ISA(nn.Module):
             q = self.Q(slots).unsqueeze(dim=-1)                      # (B, S, D_slot, 1)
 
             dots = torch.einsum('bsdi,bsjd->bsj', q, k)              # (B, S, D_slot, 1) x (B, S, N, D_slot) -> (B, S, N)
-            dots *=  self.scale                                      # (B, S, N)
-            # 裁剪dots防止softmax溢出
-            dots = torch.clamp(dots, min=-50, max=50)
+            dots = dots * self.scale                                 # (B, S, N)
+            # 更严格的裁剪防止softmax溢出（训练中后期dots可能变大）
+            dots = torch.clamp(dots, min=-30, max=30)
             attn = dots.softmax(dim=1) + epsilon                     # (B, S, N) - softmax over slots
 
             # === Weighted mean ===
@@ -341,8 +341,8 @@ class ISA(nn.Module):
 
             values_ss = torch.pow(abs_grid - S_p, 2)                 # (B, S, N, 3)
             S_s = torch.einsum('bsjd,bsij->bsd', values_ss, attn)    # (B, S, N, 3) x (B, S, 1, N) -> (B, S, 3)
-            S_s = torch.sqrt(S_s + 1e-8)                             # (B, S, 3) - 添加epsilon避免sqrt(0)
-            S_s = torch.clamp(S_s, min=1e-4, max=10.0)               # 限制尺度范围防止除0或爆炸
+            S_s = torch.sqrt(S_s + 1e-6)                             # (B, S, 3) - 添加较大epsilon避免sqrt(0)梯度爆炸
+            S_s = torch.clamp(S_s, min=0.2, max=5.0)                 # 更保守的范围，防止除0或爆炸
             S_s = S_s.unsqueeze(dim=2)                               # (B, S, 1, 3)
 
             # === Update slots (与坐标维度无关，保持不变) ===

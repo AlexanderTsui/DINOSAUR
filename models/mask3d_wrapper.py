@@ -65,7 +65,10 @@ class FeatureProjector(nn.Module):
         """
         # 先对输入做归一化，防止Mask3D特征的极端值
         x = self.input_norm(x)
-        return self.projector(x)
+        out = self.projector(x)
+        # 输出范围控制，防止极端值传播到下游ISA模块导致梯度爆炸
+        out = torch.clamp(out, min=-10, max=10)
+        return out
 
 
 def fps_sample(features, coords, num_points, device):
@@ -268,10 +271,18 @@ class Mask3DDINOSAUR(nn.Module):
         sp_coords_norm = self.normalize_coords(sampled_coords)  # (B, num_superpoints, 3)
         
         # 4. DINOSAUR前向传播
-        reconstruction, slots, masks = self.dinosaur(
-            sp_feats_proj,    # features
-            sp_coords_norm    # point_coords
-        )
+        # 关键：ISA模块对数值精度敏感，在FP32下执行以避免梯度NaN
+        # 使用torch.cuda.amp.autocast(enabled=False)强制FP32
+        from torch.cuda.amp import autocast
+        with autocast(enabled=False):
+            # 确保输入是FP32
+            sp_feats_proj_fp32 = sp_feats_proj.float()
+            sp_coords_norm_fp32 = sp_coords_norm.float()
+            
+            reconstruction, slots, masks = self.dinosaur(
+                sp_feats_proj_fp32,    # features
+                sp_coords_norm_fp32    # point_coords
+            )
         
         return reconstruction, slots, masks, sp_feats_proj, sampled_coords
     
