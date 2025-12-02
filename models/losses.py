@@ -167,7 +167,7 @@ class DINOSAURLoss(nn.Module):
         
         Args:
             reconstruction: (B, N, D)
-            sp_feats_proj: (B, N, D) - SPFormer投影后的特征（目标）
+            sp_feats_proj: (B, N, D) - 目标特征（经过投影的编码器输出）
             slots: (B, S, D_slot)
             masks: (B, S, N)
         

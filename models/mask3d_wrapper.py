@@ -345,10 +345,24 @@ def create_mask3d_dinosaur_model(config, device='cuda'):
             self.token_num = config['model']['num_superpoints']
             self.num_points = config['model']['num_superpoints']
             self.point_feature_dim = config['model']['hidden_dim']
+            
+            # 傅里叶位置编码参数
+            self.use_fourier_pe = config['model'].get('use_fourier_pe', False)
+            self.fourier_num_frequencies = config['model'].get('fourier_num_frequencies', 6)
+            self.fourier_freq_base = config['model'].get('fourier_freq_base', 2.0)
+            self.fourier_include_input = config['model'].get('fourier_include_input', True)
     
     args = Args()
     dinosaur = DINOSAURpp(args)
-    print(f"✓ DINOSAUR: {args.num_slots} slots, {args.slot_dim}D")
+    
+    # 打印傅里叶编码信息
+    if args.use_fourier_pe:
+        fourier_dim = 3 * 2 * args.fourier_num_frequencies
+        if args.fourier_include_input:
+            fourier_dim += 3
+        print(f"✓ DINOSAUR: {args.num_slots} slots, {args.slot_dim}D, 傅里叶PE: L={args.fourier_num_frequencies}, dim={fourier_dim}")
+    else:
+        print(f"✓ DINOSAUR: {args.num_slots} slots, {args.slot_dim}D")
     
     # 4. 封装完整模型
     print("\n组装完整模型...")

@@ -1,5 +1,4 @@
 import warnings
-
 import torch.nn as nn
 import torch
 import numpy as np
@@ -10,6 +9,64 @@ import random
 import timm
 
 from sklearn.cluster import AgglomerativeClustering
+
+
+class FourierPositionalEncoding(nn.Module):
+    """
+    傅里叶位置编码模块
+    将低维坐标(x,y,z)映射为高维傅里叶特征，帮助网络学习高频空间信息
+    参考论文: Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains
+    """
+    def __init__(self, num_frequencies=6, freq_base=2.0, include_input=True, input_dim=3):
+        """
+        Args:
+            num_frequencies: 频率数量L
+            freq_base: 频率基数σ，产生 σ^0, σ^1, ..., σ^(L-1) 的频率
+            include_input: 是否在输出中拼接原始坐标
+            input_dim: 输入坐标维度（默认3，即xyz）
+        """
+        super().__init__()
+        self.num_frequencies = num_frequencies
+        self.freq_base = freq_base
+        self.include_input = include_input
+        self.input_dim = input_dim
+        
+        # 计算输出维度: input_dim * 2 * L (sin + cos) + (input_dim if include_input)
+        self.output_dim = input_dim * 2 * num_frequencies
+        if include_input:
+            self.output_dim += input_dim
+        
+        # 预计算频率向量: [σ^0, σ^1, ..., σ^(L-1)] = [1, 2, 4, 8, ...]
+        freq_bands = freq_base ** torch.arange(num_frequencies).float()  # (L,)
+        # 注册为buffer，不参与梯度计算但会随模型移动到正确设备
+        self.register_buffer('freq_bands', freq_bands)
+    
+    def forward(self, coords):
+        """
+        Args:
+            coords: 输入坐标 (..., input_dim)，任意前导维度
+        Returns:
+            encoded: 傅里叶编码特征 (..., output_dim)
+        """
+        # coords: (..., 3)
+        # 扩展频率维度进行广播: coords[..., None] -> (..., 3, 1)
+        # freq_bands -> (L,) 广播后 -> (..., 3, L)
+        scaled_coords = coords[..., None] * self.freq_bands * 2 * math.pi  # (..., 3, L)
+        
+        # 计算sin和cos
+        sin_features = torch.sin(scaled_coords)  # (..., 3, L)
+        cos_features = torch.cos(scaled_coords)  # (..., 3, L)
+        
+        # 交错排列sin和cos: [sin(f0*x), cos(f0*x), sin(f1*x), cos(f1*x), ...]
+        # 先stack再reshape: (..., 3, L, 2) -> (..., 3*L*2)
+        fourier_features = torch.stack([sin_features, cos_features], dim=-1)  # (..., 3, L, 2)
+        fourier_features = fourier_features.reshape(*coords.shape[:-1], -1)   # (..., 3*L*2)
+        
+        # 可选：拼接原始坐标
+        if self.include_input:
+            fourier_features = torch.cat([coords, fourier_features], dim=-1)  # (..., 3 + 3*L*2)
+        
+        return fourier_features
 
 
 class Loss_Function(nn.Module):
@@ -73,9 +130,7 @@ class Visual_Encoder(nn.Module):
         
         self.resize_to = args.resize_to
         self.token_num = args.token_num
-
         self.encoder = args.encoder
-
         self.model = self.load_model(args)
 
 
@@ -177,8 +232,27 @@ class ISA(nn.Module):
         # abs_grid将在forward中动态接收点云坐标
         # === === ===
 
-        # 3D坐标编码网络（从2D改为3D）
-        self.h = nn.Linear(3, self.slot_dim)  # 用于get_rel_grid
+        # === 傅里叶位置编码配置 ===
+        self.use_fourier_pe = getattr(args, 'use_fourier_pe', False)
+        if self.use_fourier_pe:
+            num_frequencies = getattr(args, 'fourier_num_frequencies', 6)
+            freq_base = getattr(args, 'fourier_freq_base', 2.0)
+            include_input = getattr(args, 'fourier_include_input', True)
+            
+            # 创建傅里叶编码模块
+            self.fourier_encoder = FourierPositionalEncoding(
+                num_frequencies=num_frequencies,
+                freq_base=freq_base,
+                include_input=include_input,
+                input_dim=3
+            )
+            coord_encoding_dim = self.fourier_encoder.output_dim  # 傅里叶编码后的维度
+        else:
+            coord_encoding_dim = 3  # 原始xyz维度
+        # === === ===
+
+        # 3D坐标编码网络（输入维度根据是否使用傅里叶编码而变化）
+        self.h = nn.Linear(coord_encoding_dim, self.slot_dim)  # 用于get_rel_grid
         # === === ===
 
         # === Slot related ===
@@ -212,8 +286,8 @@ class ISA(nn.Module):
         self.K = nn.Linear(self.slot_dim, self.slot_dim, bias=False)
         self.V = nn.Linear(self.slot_dim, self.slot_dim, bias=False)
 
-        # 3D相对坐标编码网络（从2D改为3D）
-        self.g = nn.Linear(3, self.slot_dim)  # 用于forward中的相对坐标
+        # 3D相对坐标编码网络（输入维度根据是否使用傅里叶编码而变化）
+        self.g = nn.Linear(coord_encoding_dim, self.slot_dim)  # 用于forward中的相对坐标
         self.f = nn.Sequential(nn.Linear(self.slot_dim, self.slot_dim),
                                nn.ReLU(inplace=True),
                                nn.Linear(self.slot_dim, self.slot_dim))
@@ -251,6 +325,11 @@ class ISA(nn.Module):
         S_s_safe = torch.clamp(S_s, min=0.2) + 0.1                              # 确保S_s不会太小
         rel_grid = (abs_grid - S_p) / (S_s_safe * self.sigma + 1e-6)            # (B, S, N, 3)
         rel_grid = torch.clamp(rel_grid, min=-3, max=3)                         # 防止极端值
+        
+        # 傅里叶位置编码（如果启用）
+        if self.use_fourier_pe:
+            rel_grid = self.fourier_encoder(rel_grid)                           # (B, S, N, fourier_dim)
+        
         rel_grid = self.h(rel_grid)                                             # (B, S, N, D_slot) - 通过MLP编码
 
         return rel_grid
@@ -316,8 +395,14 @@ class ISA(nn.Module):
             rel_grid = (abs_grid - S_p) / (S_s_safe * self.sigma + 1e-4)  # (B, S, N, 3) - 3D相对坐标
             rel_grid = torch.clamp(rel_grid, min=-3, max=3)          # 更严格的裁剪防止爆炸
             
-            k = self.f(self.K(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
-            v = self.f(self.V(inputs) + self.g(rel_grid))            # (B, S, N, D_slot)
+            # 傅里叶位置编码（如果启用）
+            if self.use_fourier_pe:
+                rel_grid_encoded = self.fourier_encoder(rel_grid)    # (B, S, N, fourier_dim)
+            else:
+                rel_grid_encoded = rel_grid                          # (B, S, N, 3)
+            
+            k = self.f(self.K(inputs) + self.g(rel_grid_encoded))    # (B, S, N, D_slot)
+            v = self.f(self.V(inputs) + self.g(rel_grid_encoded))    # (B, S, N, D_slot)
 
             # === Calculate attention ===
             q = self.Q(slots).unsqueeze(dim=-1)                      # (B, S, D_slot, 1)
