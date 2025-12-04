@@ -12,7 +12,7 @@ model:
   num_superpoints: 4096             # FPS采样的超点数量
   
   # DINOSAUR配置
-  num_slots: 32                     # Slot数量
+  num_slots: 24                     # Slot数量
   slot_dim: 256                     # Slot维度
   slot_att_iter: 5                  # Slot Attention迭代次数
   query_opt: True                   # 使用可学习的slot初始化
@@ -93,7 +93,7 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/05
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/06
   save_interval: 5                 # 保存间隔（epochs）
   keep_checkpoint_max: 5            # 最多保留checkpoint数量
 
@@ -107,6 +107,6 @@ visualization:
 # ==================== 其他配置 ====================
 seed: 42
 device: cuda
-gpu_ids: [4]                        # 使用的GPU ID
+gpu_ids: [6]                        # 使用的GPU ID
 log_interval: 20                    # 日志打印间隔（iterations）
 

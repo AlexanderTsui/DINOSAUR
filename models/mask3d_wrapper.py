@@ -389,6 +389,250 @@ def create_mask3d_dinosaur_model(config, device='cuda'):
     return model
 
 
+class LogoSPDINOSAUR(nn.Module):
+    """
+    LogoSP + Projector + DINOSAUR 模型封装
+    
+    组件:
+    1. LogoSPFeatureExtractor (冻结) - 提取体素级特征 (384维)
+    2. FPS采样层
+    3. Feature Projector (可训练) - 384维 → hidden_dim
+    4. DINOSAUR ISA (可训练)
+    
+    输入: xyz (B, N, 3), rgb (B, N, 3)
+    输出: reconstruction, slots, masks, sp_feats_proj, sampled_coords
+    """
+    
+    def __init__(self, logosp_extractor, projector, dinosaur, num_superpoints=4096):
+        """
+        参数:
+            logosp_extractor: LogoSPFeatureExtractor 实例
+            projector: FeatureProjector 实例
+            dinosaur: DINOSAURpp 实例
+            num_superpoints: FPS 采样的超点数量
+        """
+        super().__init__()
+        
+        self.logosp = logosp_extractor
+        self.projector = projector
+        self.dinosaur = dinosaur
+        self.num_superpoints = num_superpoints
+        
+        print("[LogoSPDINOSAUR] 模型初始化完成")
+        print(f"  - LogoSP: 冻结")
+        print(f"  - 超点数量: {num_superpoints}")
+        print(f"  - Projector: 可训练")
+        print(f"  - DINOSAUR: 可训练")
+    
+    def normalize_coords(self, coords):
+        """将超点坐标归一化到[-1, 1]"""
+        B = coords.shape[0]
+        coords_norm = []
+        
+        for i in range(B):
+            c = coords[i]
+            c_min = c.min(dim=0)[0]
+            c_max = c.max(dim=0)[0]
+            c_norm = (c - c_min) / (c_max - c_min + 1e-8)
+            c_norm = c_norm * 2 - 1
+            coords_norm.append(c_norm)
+        
+        return torch.stack(coords_norm, dim=0)
+    
+    def extract_and_sample(self, xyz, rgb, device):
+        """
+        提取 LogoSP 特征并 FPS 采样
+        
+        参数:
+            xyz: (B, N, 3) 坐标
+            rgb: (B, N, 3) 颜色 [0, 1]
+            device: 设备
+        返回:
+            sampled_feats: (B, num_superpoints, feat_dim)
+            sampled_coords: (B, num_superpoints, 3)
+        """
+        import numpy as np
+        
+        B = xyz.shape[0]
+        all_feats = []
+        all_coords = []
+        
+        for i in range(B):
+            xyz_np = xyz[i].cpu().numpy()
+            rgb_np = (rgb[i].cpu().numpy() * 255).astype(np.uint8)
+            
+            # LogoSP 提取体素级特征
+            voxel_features, info = self.logosp.extract_features(
+                xyz_np, rgb_np, return_voxel_only=True
+            )
+            
+            # 转换为 Tensor
+            voxel_features = torch.from_numpy(voxel_features).float().to(device)  # (M, D)
+            inverse_map = torch.from_numpy(info['inverse_map']).long().to(device)  # (N,)
+            M = voxel_features.shape[0]
+            
+            # 计算体素的物理中心坐标
+            voxel_coords = torch.zeros((M, 3), device=device)
+            counts = torch.zeros((M, 1), device=device)
+            voxel_coords.scatter_add_(0, inverse_map.unsqueeze(1).expand(-1, 3), xyz[i])
+            counts.scatter_add_(0, inverse_map.unsqueeze(1), torch.ones_like(xyz[i][:, :1]))
+            voxel_coords = voxel_coords / (counts + 1e-6)
+            
+            # FPS 采样固定数量的点
+            sampled_feats, sampled_coords = fps_sample(
+                voxel_features, voxel_coords, self.num_superpoints, device
+            )
+            
+            all_feats.append(sampled_feats)
+            all_coords.append(sampled_coords)
+        
+        sp_feats = torch.stack(all_feats)      # (B, num_superpoints, feat_dim)
+        sp_coords = torch.stack(all_coords)    # (B, num_superpoints, 3)
+        
+        return sp_feats, sp_coords
+    
+    def forward(self, xyz, rgb):
+        """
+        前向传播
+        
+        参数:
+            xyz: (B, N, 3) 坐标
+            rgb: (B, N, 3) 颜色 [0, 1]
+        
+        返回:
+            reconstruction: (B, num_superpoints, hidden_dim)
+            slots: (B, num_slots, slot_dim)
+            masks: (B, num_slots, num_superpoints)
+            sp_feats_proj: (B, num_superpoints, hidden_dim)
+            sampled_coords: (B, num_superpoints, 3)
+        """
+        device = xyz.device
+        
+        # 1. LogoSP 特征提取 + FPS 采样（冻结，无梯度）
+        with torch.no_grad():
+            sp_feats, sampled_coords = self.extract_and_sample(xyz, rgb, device)
+        
+        # 2. 特征投影 feat_dim → hidden_dim
+        sp_feats_proj = self.projector(sp_feats)
+        
+        # 3. 归一化超点坐标到[-1, 1]
+        sp_coords_norm = self.normalize_coords(sampled_coords)
+        
+        # 4. DINOSAUR 前向传播
+        from torch.cuda.amp import autocast
+        with autocast(enabled=False):
+            sp_feats_proj_fp32 = sp_feats_proj.float()
+            sp_coords_norm_fp32 = sp_coords_norm.float()
+            
+            reconstruction, slots, masks = self.dinosaur(
+                sp_feats_proj_fp32,
+                sp_coords_norm_fp32
+            )
+        
+        return reconstruction, slots, masks, sp_feats_proj, sampled_coords
+    
+    def get_trainable_params(self):
+        """获取可训练参数"""
+        params = []
+        params += list(self.projector.parameters())
+        params += list(self.dinosaur.parameters())
+        return params
+
+
+def create_logosp_dinosaur_model(config, device='cuda'):
+    """
+    工厂函数：创建完整的 LogoSP + DINOSAUR 模型
+    
+    参数:
+        config: 配置字典
+        device: 设备
+    
+    返回:
+        model: LogoSPDINOSAUR 实例
+    """
+    from .model import DINOSAURpp
+    
+    print("=" * 60)
+    print("创建 LogoSP + DINOSAUR 模型")
+    print("=" * 60)
+    
+    # 1. 创建 LogoSP 特征提取器
+    print("\n[1/3] 加载 LogoSP...")
+    
+    logosp_dir = os.path.join(current_dir, '../../LogoSP')
+    if logosp_dir not in sys.path:
+        sys.path.insert(0, logosp_dir)
+    
+    from types import SimpleNamespace
+    from feature_extractor import LogoSPFeatureExtractor
+    
+    logosp_cfg = SimpleNamespace(
+        checkpoint_path=config['paths'].get('logosp_checkpoint'),
+        voxel_size=config['paths'].get('logosp_voxel_size', 0.05),
+        in_channels=config['paths'].get('logosp_in_channels', 3),
+        feat_dim=config['paths'].get('logosp_feat_dim', 384),
+        device=device,
+        s3dis_root='',
+        test_s3dis_scene=''
+    )
+    
+    logosp_extractor = LogoSPFeatureExtractor(logosp_cfg)
+    print(f"✓ LogoSP 加载完成: {logosp_cfg.checkpoint_path}")
+    
+    # 2. 创建 Feature Projector (384 → hidden_dim)
+    print("\n[2/3] 创建 Feature Projector...")
+    input_dim = config['paths'].get('logosp_feat_dim', 384)
+    hidden_dim = config['model']['hidden_dim']
+    projector = FeatureProjector(in_dim=input_dim, out_dim=hidden_dim)
+    print(f"✓ Projector: {input_dim}D → {hidden_dim}D")
+    
+    # 3. 创建 DINOSAUR
+    print("\n[3/3] 创建 DINOSAUR...")
+    
+    class Args:
+        def __init__(self):
+            self.num_slots = config['model']['num_slots']
+            self.slot_dim = config['model']['slot_dim']
+            self.slot_att_iter = config['model']['slot_att_iter']
+            self.query_opt = config['model'].get('query_opt', True)
+            self.ISA = config['model']['ISA']
+            self.token_num = config['model']['num_superpoints']
+            self.num_points = config['model']['num_superpoints']
+            self.point_feature_dim = config['model']['hidden_dim']
+            
+            self.use_fourier_pe = config['model'].get('use_fourier_pe', False)
+            self.fourier_num_frequencies = config['model'].get('fourier_num_frequencies', 6)
+            self.fourier_freq_base = config['model'].get('fourier_freq_base', 2.0)
+            self.fourier_include_input = config['model'].get('fourier_include_input', True)
+    
+    args = Args()
+    dinosaur = DINOSAURpp(args)
+    print(f"✓ DINOSAUR: {args.num_slots} slots, {args.slot_dim}D")
+    
+    # 4. 封装完整模型
+    print("\n组装完整模型...")
+    model = LogoSPDINOSAUR(
+        logosp_extractor=logosp_extractor,
+        projector=projector,
+        dinosaur=dinosaur,
+        num_superpoints=config['model']['num_superpoints']
+    )
+    model = model.to(device)
+    
+    # 统计参数
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print("\n" + "=" * 60)
+    print("模型统计:")
+    print("=" * 60)
+    print(f"总参数量: {total_params:,} ({total_params/1e6:.2f}M)")
+    print(f"可训练参数: {trainable_params:,} ({trainable_params/1e6:.2f}M)")
+    print("=" * 60)
+    
+    return model
+
+
 if __name__ == "__main__":
     """
     测试模型封装
