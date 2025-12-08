@@ -30,11 +30,20 @@ from typing import List, Optional, Tuple
 # 按顺序执行，前一个任务完成后才执行下一个
 TASK_QUEUE = [
     {
-        "name": "训练任务1",
-        "gpu_ids": [0,1,2,3,4,5,6,7],            # 候选GPU列表（按优先级），哪张空闲用哪张
+        "name": "恢复训练-07-epoch030",
+        "gpu_ids": [0,1,2,3,4,5,6,7],
         "config": "config/config_train_mask3d.yaml",
-        "extra_args": [],
+        "extra_args": [
+            "--resume",
+            "/home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/07/epoch_030.pth"
+        ],
     },
+    # {
+    #     "name": "训练任务1",
+    #     "gpu_ids": [0,1,2,3,4,5,6,7],            # 候选GPU列表（按优先级），哪张空闲用哪张
+    #     "config": "config/config_train_mask3d.yaml",
+    #     "extra_args": [],
+    # },
     # {
     #     "name": "训练任务2",
     #     "gpu_ids": [5,6,7],            # 同样支持多卡
@@ -63,7 +72,7 @@ TRAIN_SCRIPT = "train_3d_mask3d.py"
 GPU_MEM_USED_THRESHOLD_MB = 2000  # 已用显存<2GB时可用
 
 # 方式2：基于剩余显存 - 剩余显存高于此值(MB)视为可用（推荐）
-GPU_MEM_FREE_THRESHOLD_MB = 20000 # 剩余>18GB可用
+GPU_MEM_FREE_THRESHOLD_MB = 23000 # 剩余>20GB可用
 
 # 判断模式："used"基于已用显存，"free"基于剩余显存
 GPU_CHECK_MODE = "free"  # 推荐用"free"模式

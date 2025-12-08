@@ -617,6 +617,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='config/config_train_mask3d.yaml')
     parser.add_argument('--test_run', action='store_true', help='测试运行模式（仅2个epoch）')
+    parser.add_argument('--resume', type=str, default='', help='checkpoint路径，留空则不恢复')
     args = parser.parse_args()
     
     # 加载配置
@@ -783,16 +784,30 @@ def main():
     # 混合精度
     scaler = GradScaler(enabled=config['train']['use_amp'])
     
+    # 可选恢复训练
+    start_epoch = 0
+    best_val_loss = float('inf')
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cuda')
+        target_model = model.module if world_size > 1 else model
+        target_model.projector.load_state_dict(checkpoint['model_state_dict']['projector'])
+        target_model.dinosaur.load_state_dict(checkpoint['model_state_dict']['dinosaur'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        best_val_loss = checkpoint.get('val_loss', best_val_loss)
+        start_epoch = checkpoint.get('epoch', -1) + 1
+        if rank == 0:
+            print(f"[恢复] 从epoch {checkpoint.get('epoch', '未知')} 继续训练，best_val_loss={best_val_loss:.6f}")
+    
     if rank == 0:
         print(f"\n模型创建完成")
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"可训练参数: {trainable_params:,}")
     
     # 训练循环
-    best_val_loss = float('inf')
     start_time = time.time()
     
-    for epoch in range(config['train']['epochs']):
+    for epoch in range(start_epoch, config['train']['epochs']):
         if rank == 0:
             print(f"\n{'='*60}")
             print(f"Epoch {epoch+1}/{config['train']['epochs']}")
