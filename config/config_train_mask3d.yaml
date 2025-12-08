@@ -3,6 +3,7 @@
 
 # ==================== 模型配置 ====================
 model:
+  backbone: logosp                # 选择backbone: mask3d 或 logosp
   # Mask3D配置
   mask3d_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/area1_scannet_pretrained.ckpt
   input_dim: 96                     # Mask3D f_point输出维度
@@ -12,7 +13,7 @@ model:
   num_superpoints: 4096             # FPS采样的超点数量
   
   # DINOSAUR配置
-  num_slots: 32                     # Slot数量
+  num_slots: 24                     # Slot数量
   slot_dim: 256                     # Slot维度
   slot_att_iter: 5                  # Slot Attention迭代次数
   query_opt: True                   # 使用可学习的slot初始化
@@ -20,12 +21,20 @@ model:
   
   # 傅里叶位置编码配置
   use_fourier_pe: False              # 是否使用傅里叶位置编码
-  fourier_num_frequencies: 4        # 傅里叶频率数量L（输出维度=3*2*L=36）
+  fourier_num_frequencies: 6        # 傅里叶频率数量L（输出维度=3*2*L=36）
   fourier_freq_base: 2.0            # 频率基数σ（产生σ^0, σ^1, ..., σ^(L-1)的频率）
   fourier_include_input: True       # 是否拼接原始坐标（True时输出维度=36+3=39）
 
+paths:
+  logosp_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/LogoSP/LogoSP_ckpt/ScanNet/distill/checkpoint_300.tar
+  logosp_voxel_size: 0.05
+  logosp_in_channels: 3
+  logosp_feat_dim: 384
+
 # ==================== 数据配置 ====================
 data:
+  dataset: scannet
+  scannet_root: /home/pbw/data/scannetv2/download/scans
   # S3DIS数据集
   s3dis_root: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/dataset/S3DIS/Stanford_Large-Scale_Indoor_Spaces_3D_Dataset/Stanford3dDataset_v1.2_Aligned_Version
   train_areas: [1, 2, 3, 4, 6]      # 训练集Area
@@ -93,7 +102,7 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/05
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/07
   save_interval: 5                 # 保存间隔（epochs）
   keep_checkpoint_max: 5            # 最多保留checkpoint数量
 
@@ -107,6 +116,6 @@ visualization:
 # ==================== 其他配置 ====================
 seed: 42
 device: cuda
-gpu_ids: [4]                        # 使用的GPU ID
+gpu_ids: [6]                        # 使用的GPU ID
 log_interval: 20                    # 日志打印间隔（iterations）
 

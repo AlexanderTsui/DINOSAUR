@@ -44,18 +44,59 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
-# 添加路径
+# ==================== 路径设置 ====================
+# current_dir: DINOSAUR 目录（包含 data/, models/, utils/ 子目录）
+# 使用绝对导入避免与 src/models 冲突
 current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, current_dir)
 
-# 导入自定义模块
-from data.s3dis_dataset_mask3d import S3DISMask3DDataset, collate_fn_mask3d
-from models.mask3d_wrapper import create_mask3d_dinosaur_model
-from models.losses import DINOSAURLoss
+# 使用 importlib 进行绝对路径导入，避免 sys.path 污染导致的模块冲突
+import importlib.util
+
+def _import_module_from_path(module_name, file_path):
+    """从指定路径导入模块"""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+# 导入 DINOSAUR/data 下的数据集模块
+_s3dis_dataset = _import_module_from_path(
+    'dinosaur_s3dis_dataset',
+    os.path.join(current_dir, 'data', 's3dis_dataset_mask3d.py')
+)
+S3DISMask3DDataset = _s3dis_dataset.S3DISMask3DDataset
+collate_fn_mask3d = _s3dis_dataset.collate_fn_mask3d
+
+_scannet_dataset = _import_module_from_path(
+    'dinosaur_scannet_dataset',
+    os.path.join(current_dir, 'data', 'scannet_dataset.py')
+)
+ScanNetDataset = _scannet_dataset.ScanNetDataset
+collate_fn_scannet = _scannet_dataset.collate_fn_scannet
+
+# 导入 DINOSAUR/models 下的模块
+_mask3d_wrapper = _import_module_from_path(
+    'dinosaur_mask3d_wrapper',
+    os.path.join(current_dir, 'models', 'mask3d_wrapper.py')
+)
+create_mask3d_dinosaur_model = _mask3d_wrapper.create_mask3d_dinosaur_model
+create_logosp_dinosaur_model = _mask3d_wrapper.create_logosp_dinosaur_model
+
+_losses = _import_module_from_path(
+    'dinosaur_losses',
+    os.path.join(current_dir, 'models', 'losses.py')
+)
+DINOSAURLoss = _losses.DINOSAURLoss
 
 # 导入可视化工具
-sys.path.insert(0, os.path.join(current_dir, 'utils'))
-from visualizer import visualize_slot_assignment, visualize_reconstruction_error, visualize_slot_statistics
+_visualizer = _import_module_from_path(
+    'dinosaur_visualizer',
+    os.path.join(current_dir, 'utils', 'visualizer.py')
+)
+visualize_slot_assignment = _visualizer.visualize_slot_assignment
+visualize_reconstruction_error = _visualizer.visualize_reconstruction_error
+visualize_slot_statistics = _visualizer.visualize_slot_statistics
 
 
 def _rgb_to_plotly_colors(rgb_array: np.ndarray):
@@ -632,21 +673,42 @@ def main():
         writer = SummaryWriter(log_dir)
         print(f"TensorBoard日志: {log_dir}")
     
-    # 创建数据集
-    train_dataset = S3DISMask3DDataset(
-        root_dir=config['data']['s3dis_root'],
-        areas=config['data']['train_areas'],
-        max_points=config['data']['max_points'],
-        augment=True,
-        aug_config=config['augmentation']
-    )
-    
-    val_dataset = S3DISMask3DDataset(
-        root_dir=config['data']['s3dis_root'],
-        areas=config['data']['val_areas'],
-        max_points=config['data']['max_points'],
-        augment=False
-    )
+    # 创建数据集（支持 S3DIS / ScanNet）
+    dataset_name = config['data'].get('dataset', 's3dis').lower()
+    if dataset_name == 's3dis':
+        train_dataset = S3DISMask3DDataset(
+            root_dir=config['data']['s3dis_root'],
+            areas=config['data']['train_areas'],
+            max_points=config['data']['max_points'],
+            augment=True,
+            aug_config=config['augmentation']
+        )
+        
+        val_dataset = S3DISMask3DDataset(
+            root_dir=config['data']['s3dis_root'],
+            areas=config['data']['val_areas'],
+            max_points=config['data']['max_points'],
+            augment=False
+        )
+        collate_fn = collate_fn_mask3d
+    elif dataset_name == 'scannet':
+        # 使用本地 DINOSAUR/data/scannet_dataset.py（已在文件头部导入）
+        train_dataset = ScanNetDataset(
+            root_dir=config['data']['scannet_root'],
+            split='train',
+            max_points=config['data']['max_points'],
+            augment=True,
+            aug_config=config['augmentation']
+        )
+        val_dataset = ScanNetDataset(
+            root_dir=config['data']['scannet_root'],
+            split='val',
+            max_points=config['data']['max_points'],
+            augment=False
+        )
+        collate_fn = collate_fn_scannet
+    else:
+        raise ValueError(f"未知数据集: {dataset_name}")
     
     # 创建DataLoader
     train_loader_kwargs = dict(
@@ -654,7 +716,7 @@ def main():
         shuffle=True,
         num_workers=config['train']['num_workers'],
         pin_memory=config['train']['pin_memory'],
-        collate_fn=collate_fn_mask3d
+        collate_fn=collate_fn
     )
     if config['train']['num_workers'] > 0:
         train_loader_kwargs['persistent_workers'] = config['train'].get('persistent_workers', False)
@@ -666,7 +728,7 @@ def main():
         batch_size=1,
         shuffle=False,
         num_workers=2,
-        collate_fn=collate_fn_mask3d
+        collate_fn=collate_fn
     )
     
     # 准备可视化样本
@@ -678,8 +740,14 @@ def main():
         print(f"  训练: {len(train_dataset)} 个房间")
         print(f"  验证: {len(val_dataset)} 个房间")
     
-    # 创建模型
-    model = create_mask3d_dinosaur_model(config).cuda()
+    # 创建模型（支持 Mask3D / LogoSP 两种特征提取器）
+    backbone = config['model'].get('backbone', 'mask3d').lower()
+    if backbone == 'mask3d':
+        model = create_mask3d_dinosaur_model(config).cuda()
+    elif backbone == 'logosp':
+        model = create_logosp_dinosaur_model(config).cuda()
+    else:
+        raise ValueError(f"Unsupported backbone: {backbone}")
     
     if world_size > 1:
         model = nn.parallel.DistributedDataParallel(

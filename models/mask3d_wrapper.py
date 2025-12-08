@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import sys
 import os
+import importlib.util
 
 # 添加PLM路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,23 @@ try:
 except ImportError:
     print("[Warning] pointnet2_ops未安装，将使用随机采样代替FPS")
     HAS_POINTNET2 = False
+
+
+def _import_module_from_path(module_name, file_path):
+    """从指定路径导入模块，避免相对导入问题"""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# 使用绝对路径导入 DINOSAURpp，避免相对导入失败
+_dinosaur_model = _import_module_from_path(
+    'dinosaur_model_module',
+    os.path.join(current_dir, 'model.py')
+)
+DINOSAURpp = _dinosaur_model.DINOSAURpp
 
 
 class FeatureProjector(nn.Module):
@@ -308,8 +326,7 @@ def create_mask3d_dinosaur_model(config, device='cuda'):
     # 导入Mask3D
     from mask3d import get_model
     
-    # 导入DINOSAUR
-    from .model import DINOSAURpp
+    # DINOSAURpp 已在文件开头导入
     
     print("=" * 60)
     print("创建 Mask3D + DINOSAUR 模型")
@@ -459,9 +476,13 @@ class LogoSPDINOSAUR(nn.Module):
         
         for i in range(B):
             xyz_np = xyz[i].cpu().numpy()
-            rgb_np = (rgb[i].cpu().numpy() * 255).astype(np.uint8)
             
-            # LogoSP 提取体素级特征
+            # LogoSP 需要 xyz + rgb，确保颜色存在并转换到 0-255 uint8
+            if rgb is None:
+                raise ValueError("LogoSP 模式需要 rgb 作为输入 (xyzrgb)")
+            rgb_np = (rgb[i].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            
+            # LogoSP 提取体素级特征（使用颜色）
             voxel_features, info = self.logosp.extract_features(
                 xyz_np, rgb_np, return_voxel_only=True
             )
@@ -550,7 +571,7 @@ def create_logosp_dinosaur_model(config, device='cuda'):
     返回:
         model: LogoSPDINOSAUR 实例
     """
-    from .model import DINOSAURpp
+    # DINOSAURpp 已在文件开头导入
     
     print("=" * 60)
     print("创建 LogoSP + DINOSAUR 模型")
@@ -559,12 +580,12 @@ def create_logosp_dinosaur_model(config, device='cuda'):
     # 1. 创建 LogoSP 特征提取器
     print("\n[1/3] 加载 LogoSP...")
     
-    logosp_dir = os.path.join(current_dir, '../../LogoSP')
-    if logosp_dir not in sys.path:
-        sys.path.insert(0, logosp_dir)
-    
     from types import SimpleNamespace
-    from feature_extractor import LogoSPFeatureExtractor
+    
+    # 使用 importlib 强制加载最新版本，避免缓存问题
+    logosp_fe_path = os.path.join(current_dir, '../../LogoSP/feature_extractor.py')
+    _logosp_module = _import_module_from_path('logosp_feature_extractor_module', logosp_fe_path)
+    LogoSPFeatureExtractor = _logosp_module.LogoSPFeatureExtractor
     
     logosp_cfg = SimpleNamespace(
         checkpoint_path=config['paths'].get('logosp_checkpoint'),
