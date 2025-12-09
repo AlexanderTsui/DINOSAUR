@@ -3,9 +3,9 @@
 
 # ==================== 模型配置 ====================
 model:
-  backbone: logosp                # 选择backbone: mask3d 或 logosp
+  backbone: mask3d                # 选择backbone: mask3d 或 logosp
   # Mask3D配置
-  mask3d_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/area1_scannet_pretrained.ckpt
+  mask3d_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/scannet_val.ckpt
   input_dim: 96                     # Mask3D f_point输出维度
   hidden_dim: 768                   # 投影后维度（DINOSAUR输入，必须是768）
   
@@ -25,6 +25,7 @@ model:
   fourier_freq_base: 2.0            # 频率基数σ（产生σ^0, σ^1, ..., σ^(L-1)的频率）
   fourier_include_input: True       # 是否拼接原始坐标（True时输出维度=36+3=39）
 
+# ==================== LogoSP 模型路径配置 ====================
 paths:
   logosp_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/LogoSP/LogoSP_ckpt/ScanNet/distill/checkpoint_300.tar
   logosp_voxel_size: 0.05
@@ -37,11 +38,11 @@ data:
   scannet_root: /home/pbw/data/scannetv2/download/scans
   # S3DIS数据集
   s3dis_root: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/dataset/S3DIS/Stanford_Large-Scale_Indoor_Spaces_3D_Dataset/Stanford3dDataset_v1.2_Aligned_Version
-  train_areas: [1, 2, 3, 4, 6]      # 训练集Area
+  train_areas: [1, 2, 3, 4, 5, 6]      # 训练集Area
   val_areas: [5]                    # 验证集Area
   
   # 数据预处理
-  max_points: 80000                 # 输入最大点数
+  max_points: 50000                 # 输入最大点数
 
 # ==================== 训练配置 ====================
 train:
@@ -102,7 +103,7 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/07
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d_scannet/scannet_val
   save_interval: 5                 # 保存间隔（epochs）
   keep_checkpoint_max: 5            # 最多保留checkpoint数量
 
@@ -116,6 +117,6 @@ visualization:
 # ==================== 其他配置 ====================
 seed: 42
 device: cuda
-gpu_ids: [6]                        # 使用的GPU ID
+gpu_ids: [4]                        # 使用的GPU ID
 log_interval: 20                    # 日志打印间隔（iterations）
 

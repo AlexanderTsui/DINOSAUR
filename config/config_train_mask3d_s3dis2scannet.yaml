@@ -1,0 +1,122 @@
+# ==================== Mask3D + DINOSAUR 训练配置 ====================
+# 使用Mask3D作为特征提取器，提取f_point特征(96维)
+
+# ==================== 模型配置 ====================
+model:
+  backbone: mask3d                # 选择backbone: mask3d 或 logosp
+  # Mask3D配置
+  mask3d_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/area1_from_scratch.ckpt
+  input_dim: 96                     # Mask3D f_point输出维度
+  hidden_dim: 768                   # 投影后维度（DINOSAUR输入，必须是768）
+  
+  # 采样配置
+  num_superpoints: 4096             # FPS采样的超点数量
+  
+  # DINOSAUR配置
+  num_slots: 24                     # Slot数量
+  slot_dim: 256                     # Slot维度
+  slot_att_iter: 5                  # Slot Attention迭代次数
+  query_opt: True                   # 使用可学习的slot初始化
+  ISA: True                         # 使用Invariant Slot Attention
+  
+  # 傅里叶位置编码配置
+  use_fourier_pe: False              # 是否使用傅里叶位置编码
+  fourier_num_frequencies: 6        # 傅里叶频率数量L（输出维度=3*2*L=36）
+  fourier_freq_base: 2.0            # 频率基数σ（产生σ^0, σ^1, ..., σ^(L-1)的频率）
+  fourier_include_input: True       # 是否拼接原始坐标（True时输出维度=36+3=39）
+
+# ==================== LogoSP 模型路径配置 ====================
+paths:
+  logosp_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/LogoSP/LogoSP_ckpt/ScanNet/distill/checkpoint_300.tar
+  logosp_voxel_size: 0.05
+  logosp_in_channels: 3
+  logosp_feat_dim: 384
+
+# ==================== 数据配置 ====================
+data:
+  dataset: scannet
+  scannet_root: /home/pbw/data/scannetv2/download/scans
+  # S3DIS数据集
+  s3dis_root: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/dataset/S3DIS/Stanford_Large-Scale_Indoor_Spaces_3D_Dataset/Stanford3dDataset_v1.2_Aligned_Version
+  train_areas: [1, 2, 3, 4, 5, 6]      # 训练集Area
+  val_areas: [5]                    # 验证集Area
+  
+  # 数据预处理
+  max_points: 50000                 # 输入最大点数
+
+# ==================== 训练配置 ====================
+train:
+  # 批次配置（Mask3D较大，batch_size需要减小）
+  batch_size_per_gpu: 2             # 单卡batch size
+  accumulation_steps: 1             # 梯度累积步数
+  num_workers: 4                    # 数据加载进程数
+  pin_memory: True
+  persistent_workers: True          # DataLoader在epoch之间保持worker常驻
+  prefetch_factor: 2                # 每个worker预取的batch数
+  
+  # 训练轮次
+  epochs: 200
+  warmup_epochs: 5                  # Warmup轮次
+  
+  # 梯度相关
+  grad_clip_norm: 0.5               # 梯度裁剪（降低阈值防止梯度爆炸）
+  use_amp: True                     # 混合精度训练
+  detect_anomaly: False             # 启用autograd异常检测（调试时开启）
+  log_grad_details_on_nan: True     # 当出现NaN梯度时打印参数详情
+  grad_debug_max_params: 5          # 打印出现异常梯度的参数数量上限
+  
+  # 优化器
+  optimizer:
+    lr: 1.0e-4                      # 学习率
+    weight_decay: 0.01              # 权重衰减
+    betas: [0.9, 0.999]             # Adam beta参数
+  
+  # 学习率调度器
+  scheduler:
+    type: "poly"                    # poly衰减
+    power: 1.2                      # 衰减指数（增大使学习率下降更快，减少中后期NaN）
+
+# ==================== 损失函数权重 ====================
+loss:
+  weights:
+    reconstruction: 1.0             # MSE重建损失权重
+    mask_entropy: 0               # Mask熵正则（鼓励确定性分配）
+    slot_diversity: 0             # Slot多样性损失
+    mask_uniformity: 0           # Mask均匀性损失（防止所有点塌缩到单个slot）
+
+# ==================== 数据增强 ====================
+augmentation:
+  rotation_range: [-5, 5]           # 随机旋转范围（度）
+  scale_range: [0.95, 1.05]         # 随机缩放范围
+  translation: 0.1                  # 随机平移
+  jitter_sigma: 0.01                # 坐标抖动标准差
+  color_jitter: 0.05                # RGB颜色抖动
+
+# ==================== 分布式训练 ====================
+distributed:
+  find_unused_parameters: True      # DDP查找未使用参数
+
+# ==================== 验证配置 ====================
+validation:
+  val_interval: 1                   # 验证间隔（每N个epoch进行一次验证）
+  early_stopping_patience: 20       # 早停patience
+
+# ==================== Checkpoint配置 ====================
+checkpoint:
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d_s3dis2scannet/area1_from_scratch
+  save_interval: 5                 # 保存间隔（epochs）
+  keep_checkpoint_max: 5            # 最多保留checkpoint数量
+
+# ==================== 可视化配置 ====================
+visualization:
+  save_html: True                   # 是否生成交互式HTML
+  html_point_size: 2.0              # HTML中原始点云的点大小
+  html_slot_point_size: 4.0         # HTML中slot点大小
+  num_vis_samples: 3                # 可视化样本数量
+
+# ==================== 其他配置 ====================
+seed: 42
+device: cuda
+gpu_ids: [7]                        # 使用的GPU ID
+log_interval: 20                    # 日志打印间隔（iterations）
+
