@@ -22,7 +22,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 
@@ -676,6 +676,7 @@ def main():
     
     # 创建数据集（支持 S3DIS / ScanNet）
     dataset_name = config['data'].get('dataset', 's3dis').lower()
+    train_scope = str(config['data'].get('train_scope', 'train')).lower()
     if dataset_name == 's3dis':
         train_dataset = S3DISMask3DDataset(
             root_dir=config['data']['s3dis_root'],
@@ -693,20 +694,35 @@ def main():
         )
         collate_fn = collate_fn_mask3d
     elif dataset_name == 'scannet':
-        # 使用本地 DINOSAUR/data/scannet_dataset.py（已在文件头部导入）
-        train_dataset = ScanNetDataset(
-            root_dir=config['data']['scannet_root'],
-            split='train',
-            max_points=config['data']['max_points'],
-            augment=True,
-            aug_config=config['augmentation']
-        )
-        val_dataset = ScanNetDataset(
-            root_dir=config['data']['scannet_root'],
-            split='val',
-            max_points=config['data']['max_points'],
-            augment=False
-        )
+        # ScanNet: 强制使用官方 train/val 划分；自监督可选 train / val / train+val
+        allowed_scopes = {'train', 'val', 'trainval', 'all'}
+        if train_scope not in allowed_scopes:
+            raise ValueError(f"不支持的train_scope: {train_scope}，可选: {allowed_scopes}")
+
+        def build_scannet(split, for_training):
+            return ScanNetDataset(
+                root_dir=config['data']['scannet_root'],
+                split=split,  # 官方划分
+                max_points=config['data']['max_points'],
+                augment=for_training,
+                aug_config=config['augmentation']
+            )
+
+        if train_scope == 'train':
+            train_dataset = build_scannet('train', True)
+            train_split_desc = '官方 train'
+        elif train_scope == 'val':
+            train_dataset = build_scannet('val', True)
+            train_split_desc = '官方 val (自监督)'
+        else:  # trainval / all
+            train_dataset = ConcatDataset([
+                build_scannet('train', True),
+                build_scannet('val', True),
+            ])
+            train_split_desc = '官方 train+val (自监督)'
+
+        # 验证集始终使用官方 val，保持评估一致
+        val_dataset = build_scannet('val', False)
         collate_fn = collate_fn_scannet
     else:
         raise ValueError(f"未知数据集: {dataset_name}")
@@ -740,6 +756,8 @@ def main():
         print(f"\n数据集:")
         print(f"  训练: {len(train_dataset)} 个房间")
         print(f"  验证: {len(val_dataset)} 个房间")
+        if dataset_name == 'scannet':
+            print(f"  训练划分: {train_split_desc}（严格使用官方train/val列表）")
     
     # 创建模型（支持 Mask3D / LogoSP 两种特征提取器）
     backbone = config['model'].get('backbone', 'mask3d').lower()

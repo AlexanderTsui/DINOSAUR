@@ -5,7 +5,7 @@
 model:
   backbone: logosp                # 选择backbone: mask3d 或 logosp
   # Mask3D配置
-  mask3d_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/area1_from_scratch.ckpt
+  mask3d_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/scannet_val.ckpt
   input_dim: 96                     # Mask3D f_point输出维度
   hidden_dim: 768                   # 投影后维度（DINOSAUR输入，必须是768）
   
@@ -34,8 +34,11 @@ paths:
 
 # ==================== 数据配置 ====================
 data:
-  dataset: scannet
-  scannet_root: /home/pbw/data/scannetv2/download/scans
+  dataset: s3dis
+  # ScanNet根目录，需包含 scans/ 以及 ScanNet_splits/ 下的官方划分txt
+  scannet_root: /home/pbw/data/scannetv2/download
+  # 训练范围: train / val / trainval / all (自监督可用全量或train+val)
+  train_scope: all
   # S3DIS数据集
   s3dis_root: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/dataset/S3DIS/Stanford_Large-Scale_Indoor_Spaces_3D_Dataset/Stanford3dDataset_v1.2_Aligned_Version
   train_areas: [1, 2, 3, 4, 5, 6]      # 训练集Area
@@ -103,13 +106,13 @@ validation:
 
 # ==================== Checkpoint配置 ====================
 checkpoint:
-  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d_s3dis2scannet/area1_from_scratch
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_logosp_scannet2s3dis/
   save_interval: 5                 # 保存间隔（epochs）
   keep_checkpoint_max: 5            # 最多保留checkpoint数量
 
 # ==================== 可视化配置 ====================
 visualization:
-  save_html: False                   # 是否生成交互式HTML
+  save_html: True                   # 是否生成交互式HTML
   html_point_size: 2.0              # HTML中原始点云的点大小
   html_slot_point_size: 4.0         # HTML中slot点大小
   num_vis_samples: 3                # 可视化样本数量
@@ -117,6 +120,6 @@ visualization:
 # ==================== 其他配置 ====================
 seed: 42
 device: cuda
-gpu_ids: [7]                        # 使用的GPU ID
+gpu_ids: [5]                        # 使用的GPU ID
 log_interval: 20                    # 日志打印间隔（iterations）
 

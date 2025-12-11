@@ -81,10 +81,20 @@ class ScanNetDataset(Dataset):
         self.augment = augment
         self.aug_config = aug_config or {}
         
-        # 兼容 root 直接指向 scans 目录或其父目录
+        # 兼容 root 直接指向 scans 目录或其父目录；同时支持 ScanNet_splits 子目录
         scans_basename = os.path.basename(self.root_dir.rstrip(os.sep))
         self.scans_dir = self.root_dir if scans_basename == 'scans' else os.path.join(self.root_dir, 'scans')
-        self.split_dir = self.root_dir if os.path.isfile(os.path.join(self.root_dir, f'scannetv2_{self.split}.txt')) else os.path.dirname(self.scans_dir)
+
+        # 优先查找 split 文件：root/ScanNet_splits > root > scans 同级
+        split_candidates = [
+            os.path.join(self.root_dir, 'ScanNet_splits', f'scannetv2_{self.split}.txt'),
+            os.path.join(self.root_dir, f'scannetv2_{self.split}.txt'),
+            os.path.join(os.path.dirname(self.scans_dir), 'ScanNet_splits', f'scannetv2_{self.split}.txt'),
+            os.path.join(os.path.dirname(self.scans_dir), f'scannetv2_{self.split}.txt'),
+        ]
+        self.split_file = next((p for p in split_candidates if os.path.isfile(p)), None)
+        # split_dir 仅用于记录所在目录，便于后续打印/调试
+        self.split_dir = os.path.dirname(self.split_file) if self.split_file else os.path.dirname(self.scans_dir)
         
         # 获取场景列表
         self.scene_list = self._get_scene_list()
@@ -93,12 +103,16 @@ class ScanNetDataset(Dataset):
     
     def _get_scene_list(self):
         """获取场景列表"""
-        # 检查是否有split文件
-        split_file = os.path.join(self.split_dir, f'scannetv2_{self.split}.txt')
+        # 优先使用显式找到的 split 文件
+        split_file = self.split_file or os.path.join(self.split_dir, f'scannetv2_{self.split}.txt')
         
         if os.path.exists(split_file):
             with open(split_file, 'r') as f:
-                scenes = [line.strip() for line in f if line.strip()]
+                raw = [line.strip() for line in f if line.strip()]
+                # 划分文件可能写成 sceneXXXX_00.ply，需去掉后缀、目录
+                scenes = [os.path.splitext(os.path.basename(x))[0] for x in raw]
+            if len(scenes) == 0:
+                print(f"[警告] split文件为空: {split_file}")
         else:
             # 没有split文件，使用所有场景
             if not os.path.exists(self.scans_dir):
@@ -123,6 +137,11 @@ class ScanNetDataset(Dataset):
             ply_path = os.path.join(self.scans_dir, scene, f'{scene}_vh_clean_2.ply')
             if os.path.exists(ply_path):
                 valid_scenes.append(scene)
+            else:
+                # 若缺失 _vh_clean_2.ply，再尝试 _vh_clean_2.0.ply 兼容下载脚本命名
+                alt_path = os.path.join(self.scans_dir, scene, f'{scene}_vh_clean_2.0.ply')
+                if os.path.exists(alt_path):
+                    valid_scenes.append(scene)
         
         return valid_scenes
     
@@ -136,6 +155,12 @@ class ScanNetDataset(Dataset):
         """
         scene_dir = os.path.join(self.scans_dir, scene_name)
         ply_path = os.path.join(scene_dir, f'{scene_name}_vh_clean_2.ply')
+        if not os.path.exists(ply_path):
+            alt_path = os.path.join(scene_dir, f'{scene_name}_vh_clean_2.0.ply')
+            if os.path.exists(alt_path):
+                ply_path = alt_path
+            else:
+                raise FileNotFoundError(f"未找到PLY: {ply_path}")
         xyz, rgb = read_ply_points(ply_path)
         return xyz, rgb
     

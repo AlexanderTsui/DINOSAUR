@@ -30,12 +30,12 @@ from typing import List, Optional, Tuple
 # 按顺序执行，前一个任务完成后才执行下一个
 TASK_QUEUE = [
     # {
-    #     "name": "恢复训练-07-epoch030",
+    #     "name": "恢复训练scannet2s3dis",
     #     "gpu_ids": [0,1,2,3,4,5,6,7],
-    #     "config": "config/config_train_mask3d.yaml",
+    #     "config": "config/config_train_mask3d_scannet2s3dis.yaml",
     #     "extra_args": [
     #         "--resume",
-    #         "/home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d/07/epoch_030.pth"
+    #         "/home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d_scannet2s3dis/epoch_025.pth"
     #     ],
     # },
     # {
@@ -50,18 +50,42 @@ TASK_QUEUE = [
     #     "config": "config/config_train_mask3d_s3dis2scannet.yaml",
     #     "extra_args": [],
     # }
-    {
-        "name": "mask3d_scannet",
-        "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
-        "config": "config/config_train_mask3d_scannet.yaml",
-        "extra_args": [],
-    }
+    # {
+    #     "name": "mask3d_scannet",
+    #     "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+    #     "config": "config/config_train_mask3d_scannet.yaml",
+    #     "extra_args": [],
+    # }
     # {
     #     "name": "mask3d_scannet2s3dis",
     #         "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
     #         "config": "config/config_train_mask3d_scannet2s3dis.yaml",
     #         "extra_args": [],
     # }
+    # {
+    #     "name": "LogoSP_s3dis",
+    #         "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+    #         "config": "config/config_train_LogoSP_s3dis.yaml",
+    #         "extra_args": [],
+    # }
+    # {
+    #     "name": "LogoSP_scannet",
+    #         "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+    #         "config": "config/config_train_LogoSP_scannet.yaml",
+    #         "extra_args": [],
+    # }
+    # {
+    #     "name": "LogoSP_s3dis2scannet",
+    #         "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+    #         "config": "config/config_train_LogoSP_s3dis2scannet.yaml",
+    #         "extra_args": [],
+    # }
+    {
+        "name": "LogoSP_scannet2s3dis",
+            "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+            "config": "config/config_train_LogoSP_scannet2s3dis.yaml",
+            "extra_args": [],
+    }
 ]
 
 # 轮询间隔（秒）
