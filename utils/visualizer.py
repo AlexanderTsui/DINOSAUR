@@ -6,8 +6,28 @@
 import os
 import numpy as np
 import torch
+import matplotlib
+# 强制使用无头后端，避免在无图形环境/SSH/tmux 下 Matplotlib 卡死或阻塞
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+
+
+def _maybe_downsample(xyz: np.ndarray, *arrays, max_points: int = 5000, seed: int = 0):
+    """
+    对可视化点进行下采样，避免 3D scatter 在服务器上极慢/卡死。
+    xyz: (N,3)
+    arrays: 与 xyz 同长度的其他数组（例如 sp_labels）
+    """
+    N = len(xyz)
+    if max_points is None or max_points <= 0 or N <= max_points:
+        return (xyz,) + arrays
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(N, max_points, replace=False)
+    out = (xyz[idx],)
+    for a in arrays:
+        out = out + (a[idx],)
+    return out
 
 
 def visualize_slot_assignment(xyz, sp_labels, masks, save_path, num_slots=16):
@@ -22,6 +42,9 @@ def visualize_slot_assignment(xyz, sp_labels, masks, save_path, num_slots=16):
         num_slots: Slot数量
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # 下采样可视化点，避免 matplotlib 3D scatter 过慢
+    xyz, sp_labels = _maybe_downsample(xyz, sp_labels, max_points=5000, seed=0)
     
     # Slot分配: 从超点级映射回点级
     sp_slot_ids = masks.argmax(axis=0)  # (512,)
@@ -71,7 +94,8 @@ def visualize_slot_assignment(xyz, sp_labels, masks, save_path, num_slots=16):
     ax3.set_zlabel('Z')
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    # bbox_inches='tight' 在 3D 图上有时非常慢，默认去掉以提升稳定性
+    plt.savefig(save_path, dpi=120)
     plt.close()
 
 
@@ -87,6 +111,8 @@ def visualize_reconstruction_error(xyz, sp_labels, reconstruction, sp_feats_proj
         save_path: 保存路径
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    xyz, sp_labels = _maybe_downsample(xyz, sp_labels, max_points=8000, seed=1)
     
     # 计算每个超点的MSE
     mse_per_sp = ((reconstruction - sp_feats_proj) ** 2).mean(axis=1)  # (512,)
@@ -114,7 +140,7 @@ def visualize_reconstruction_error(xyz, sp_labels, reconstruction, sp_feats_proj
     
     plt.colorbar(scatter, ax=ax, label='MSE')
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=120)
     plt.close()
 
 
@@ -154,6 +180,6 @@ def visualize_slot_statistics(masks, save_path):
     ax.grid(axis='y', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=120)
     plt.close()
 

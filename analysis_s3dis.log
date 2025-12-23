@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/data1/cbw/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/analyze_features.py", line 28, in <module>
+    import seaborn as sns
+ModuleNotFoundError: No module named 'seaborn'

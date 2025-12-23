@@ -1,0 +1,235 @@
+# ==================== Concerto + DINOSAUR 训练配置 ====================
+# 使用 Concerto 作为冻结的 point encoder，输出点特征后 FPS 采样，再接 DINOSAUR 训练
+
+# ==================== 模型配置 ====================
+model:
+  backbone: concerto              # 选择backbone: mask3d / logosp / concerto
+  hidden_dim: 768                 # DINOSAUR输入维度（保持与现有代码一致）
+
+  # 采样配置
+  num_superpoints: 1024           # FPS采样的token数量
+
+  # DINOSAUR配置
+  num_slots: 20
+  slot_dim: 256
+  slot_att_iter: 5
+  query_opt: True
+  ISA: True
+
+  # GeoPE 位置编码（替代傅里叶位置编码）
+  use_geo_pe: True
+  geo_pe_base: 100.0
+
+  # 选择 Decoder：mlp 或 transformer
+  decoder_type: transformer          # 或 transformer
+
+  # 仅当 decoder_type=transformer 时生效（可按需调小）
+  decoder_tf_layers: 2
+  decoder_tf_heads: 8
+  decoder_tf_ff_dim: 1024
+  decoder_tf_dropout: 0.1
+
+  two_stage: false
+  # 可选：stage1/2 迭代次数
+  two_stage_stage1_iters: 3
+  two_stage_stage2_iters: 3
+  # 可选：保证 stage1 背景 slot 绑定的关键先验（仅 ISA 生效）
+  two_stage_bg_init_scale: 2.0
+  two_stage_fg_init_scale: 0.3
+  two_stage_bg_init_pos: 0.0
+  two_stage_fg_init_pos: 0.0
+  # (B) stage1: 用 token 特征均值初始化背景 slot0（更像“全局背景”）
+  two_stage_stage1_bg_mean_init: true
+  # (C) stage1: 背景 slot0 不注入 GeoPE（Residual/garbage slot，更偏向吸收分散背景）
+  two_stage_stage1_bg_no_pe: true
+
+# ==================== 路径配置 ====================
+paths:
+  # Concerto 权重（本地路径）
+  concerto_checkpoint: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/Model/concerto_base_origin.pth
+  # 与 Concerto demo 一致：上采样前两次做 concat
+  concerto_concat_levels: 2
+  # 若你的环境没有 flash_attn，建议 False（默认 False）
+  concerto_enable_flash: True
+  # 关闭 flash 时的 patch size（显存不够可调小）
+  concerto_enc_patch_size: 1024
+  # 如果自动推断 Concerto 输出维度失败，回退用这个（base/large 常用 1088）
+  concerto_feat_dim_fallback: 1088
+
+# ==================== 数据配置 ====================
+data:
+  dataset: scannet
+  scannet_root: /home/pbw/data/scannetv2/download
+  train_scope: all
+  max_points: 80000
+
+# ==================== 训练配置 ====================
+train:
+  batch_size_per_gpu: 2
+  accumulation_steps: 1
+  num_workers: 4
+  pin_memory: True
+  persistent_workers: True
+  prefetch_factor: 2
+
+  epochs: 400
+  warmup_epochs: 5
+
+  # ======== 两阶段训练（不依赖命令行）========
+  # 1) 预训练：前 pretrain_featrec_only_epochs 轮强制只用 feat_rec（其余 loss 权重置 0）
+  # 2) 若 stop_after_pretrain=True：到达该轮数后自动保存基线 checkpoint 并退出
+  #    然后把 resume_from 指向该 checkpoint，继续训练（此时会按 loss.warmup / loss.weights 生效）
+  # 关闭“仅 feat_rec 的预训练阶段”（两阶段训练）
+  enable_pretrain_featrec_only: False
+  pretrain_featrec_only_epochs: 0
+  stop_after_pretrain: False
+  resume_from: ""
+
+  grad_clip_norm: 0.5
+  use_amp: True
+  detect_anomaly: False
+  log_grad_details_on_nan: True
+  grad_debug_max_params: 5
+
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: "poly"
+    power: 1.2
+
+# ==================== 损失函数权重 ====================
+loss:
+  # L = λ_rec L_feat_rec + λ_c L_compact + λ_e L_entropy + λ_min L_min_usage + λ_s L_smooth (+ λ_con L_cons)
+  weights:
+    feat_rec: 1.0
+    compact: 0
+    entropy: 0
+    min_usage: 0
+    smooth: 0.0
+    cons: 0.0
+    diversity: 0.2
+    # (D) 背景面积正则：鼓励 slot0 覆盖更多 token（谨慎开，小权重起步）
+    bg_area: 0
+    # 对比学习损失（NEW）
+    contrastive_compact: 0.5      # Slot内紧致性（基于prototype）
+    contrastive_separate: 0.3     # Slot间分离性（多样性）
+    contrastive_fg_bg: 0.2        # 前景-背景对比（Two-Stage专用）
+  warmup:
+    enabled: True
+    log_weights: True
+    # 先学重建，再逐步打开/增大其它项（线性 ramp）
+    items:
+      feat_rec:
+        enabled: True
+        start_epoch: 0
+        warmup_epochs: 0
+        start_weight: 1.0
+      compact:
+        enabled: True
+        start_epoch: 10
+        warmup_epochs: 20
+        start_weight: 0.0
+      # 其余项默认就是 0；这里也给出开关，后续你把权重调大时可直接用
+      entropy:
+        enabled: True
+        start_epoch: 10
+        warmup_epochs: 20
+        start_weight: 0.0
+      min_usage:
+        enabled: True
+        start_epoch: 10
+        warmup_epochs: 20
+        start_weight: 0.0
+      smooth:
+        enabled: True
+        start_epoch: 30
+        warmup_epochs: 20
+        start_weight: 0.0
+      cons:
+        enabled: True
+        start_epoch: 30
+        warmup_epochs: 20
+        start_weight: 0.0
+      diversity:
+        enabled: True
+        start_epoch: 60
+        warmup_epochs: 20
+        start_weight: 0.0
+      # 对比学习损失的warmup（NEW）
+      contrastive_compact:
+        enabled: True
+        start_epoch: 20
+        warmup_epochs: 30
+        start_weight: 0.0
+      contrastive_separate:
+        enabled: True
+        start_epoch: 20
+        warmup_epochs: 30
+        start_weight: 0.0
+      contrastive_fg_bg:
+        enabled: True
+        start_epoch: 30
+        warmup_epochs: 30
+        start_weight: 0.0
+  params:
+    stop_grad_target: True
+    stop_grad_compact: True
+    # compact: 对slot内离群点的敏感度（p越大越像max）
+    compact_outlier_p: 8
+    compact_sharpen_gamma: 2.0
+    # slot diversity
+    slot_diversity_margin: 0.1
+    slot_diversity_power: 2.0
+    min_usage_rho: 0.01
+    smooth_enabled: False
+    smooth_k: 16
+    smooth_sigma_x: 0.10
+    smooth_sigma_f: 0.50
+    smooth_use_feature_weight: True
+    smooth_use_entropy_gating: True
+    smooth_entropy_gating_power: 1.0
+    # (D) 背景面积正则参数：slot0 视作背景；让 mean(mask_bg) 接近该目标比例
+    bg_slot_index: 0
+    bg_area_target: 0
+    # 对比学习损失参数（NEW）
+    contrastive_temperature: 0.07
+    eps: 1e-8
+
+# ==================== 数据增强 ====================
+augmentation:
+  rotation_range: [-5, 5]
+  scale_range: [0.95, 1.05]
+  translation: 0.1
+  jitter_sigma: 0.01
+  color_jitter: 0.05
+
+# ==================== 分布式训练 ====================
+distributed:
+  find_unused_parameters: False
+
+# ==================== 验证配置 ====================
+validation:
+  val_interval: 1
+  early_stopping_patience: 20
+
+# ==================== Checkpoint配置 ====================
+checkpoint:
+  output_dir: /home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints/checkpoints_concerto/concerto_scannet_origin_2stage/
+  save_interval: 5
+  keep_checkpoint_max: 5
+
+# ==================== 可视化配置 ====================
+visualization:
+  enabled: True              # 是否启用可视化
+  save_ply: True             # 是否导出 PLY（slot 分配结果，更轻量）
+  num_vis_samples: 3         # 可视化样本数量
+  static_timeout_sec: 120    # 静态图超时（秒）
+
+# ==================== 其他配置 ====================
+seed: 42
+device: cuda
+gpu_ids: [7]
+log_interval: 20

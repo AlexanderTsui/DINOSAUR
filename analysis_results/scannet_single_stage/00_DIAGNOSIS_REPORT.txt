@@ -1,0 +1,35 @@
+================================================================================
+DINOSAUR 特征分析诊断报告
+================================================================================
+
+## 1. 模型配置
+  - Backbone: ConcertoDINOSAUR
+  - Two-Stage: 否
+  - 样本数: 5
+
+## 2. 问题诊断
+
+### 2.1 Encoder特征质量
+
+### 2.2 Slot绑定问题
+  ✓ Slot Overlap: 0.0520 - Slots关注不同区域
+
+## 3. 改进建议
+
+  [1] 启用Two-Stage DINOSAUR
+      → 配置文件中设置 two_stage: true
+      → 强制前景-背景分离，避免slots浪费在背景上
+
+  [2] 使用对比学习损失
+      → 已集成到losses.py中
+      → 配置文件中设置 contrastive_compact/separate/fg_bg 权重
+
+  [3] 调整聚类策略
+      → 启用size和spatial特征辅助聚类
+      → 如果使用Two-Stage，聚类时排除背景slot
+
+  [4] 可视化检查
+      → 查看 02_tsne_analysis.png 确认特征是否按语义聚类
+      → 查看 03_slot_occupancy.png 确认slot使用是否均衡
+      → 查看 06_slot_features_pca.png 确认slot表征是否多样
+

@@ -13,6 +13,7 @@ import torch.nn as nn
 import sys
 import os
 import importlib.util
+import numpy as np
 
 # 添加PLM路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,11 @@ if plm_dir not in sys.path:
     sys.path.insert(0, plm_dir)
 if pll_dir not in sys.path:
     sys.path.insert(0, pll_dir)
+
+# 添加 Concerto 路径（用于 Concerto 作为 Point Encoder）
+concerto_repo_dir = os.path.join(current_dir, '../../Concerto')
+if concerto_repo_dir not in sys.path:
+    sys.path.insert(0, concerto_repo_dir)
 
 # 导入FPS采样
 try:
@@ -48,6 +54,7 @@ _dinosaur_model = _import_module_from_path(
     os.path.join(current_dir, 'model.py')
 )
 DINOSAURpp = _dinosaur_model.DINOSAURpp
+TwoStageDINOSAURpp = getattr(_dinosaur_model, "TwoStageDINOSAURpp", None)
 
 
 class FeatureProjector(nn.Module):
@@ -89,6 +96,27 @@ class FeatureProjector(nn.Module):
         return out
 
 
+def _infer_concerto_feat_dim(ckpt_config: dict, concat_levels: int = 2) -> int:
+    """
+    估计 Concerto/PTv3 在“上采样回到高分辨率”后的点特征维度。
+
+    我们复用 Concerto demo 的 upcast 逻辑：
+      - 前 concat_levels 次上采样：parent.feat = cat(parent.feat, child.feat[inverse])
+      - 后续上采样：parent.feat = child.feat[inverse]
+
+    因此最终特征维度 ≈ enc_channels[-(concat_levels+1):] 的求和。
+    对于 Concerto base/large 常见为 192+384+512 = 1088。
+    """
+    enc_channels = ckpt_config.get("enc_channels", None)
+    if enc_channels is None:
+        raise KeyError("Concerto ckpt config 中缺少 enc_channels，无法推断特征维度")
+    if not isinstance(enc_channels, (list, tuple)) or len(enc_channels) == 0:
+        raise ValueError(f"非法 enc_channels={enc_channels}")
+    k = max(int(concat_levels) + 1, 1)
+    k = min(k, len(enc_channels))
+    return int(sum(enc_channels[-k:]))
+
+
 def fps_sample(features, coords, num_points, device):
     """
     使用FPS从变长特征中采样固定数量的点
@@ -127,6 +155,207 @@ def fps_sample(features, coords, num_points, device):
             indices = torch.randperm(M, device=device)[:num_points]
     
     return features[indices], coords[indices]
+
+
+class ConcertoPointFeatureExtractor(nn.Module):
+    """
+    Concerto 特征提取器（冻结）：输入单帧点云 xyz/rgb，输出逐点特征 feat (N, D)
+
+    说明：
+    - 为了与 Concerto 官方 demo 保持一致，这里复用 concerto.transform.default() 做 CenterShift+GridSample 等预处理；
+    - 网络前向后，按 demo 的 upcast 逻辑回到高分辨率点，并用 point.inverse 映射回 GridSample 前的原始点数；
+    - 输出特征会做 clamp/nan_to_num，减少后续 DINOSAUR 训练 NaN 风险。
+    """
+
+    def __init__(
+        self,
+        ckpt_path: str,
+        device: str = "cuda",
+        concat_levels: int = 2,
+        enable_flash: bool = True,
+        enc_patch_size: int = 1024,
+    ):
+        super().__init__()
+
+        try:
+            import concerto  # noqa: F401
+        except Exception as e:
+            raise ImportError(
+                f"无法 import concerto，请确认路径存在: {concerto_repo_dir}，原始错误: {e}"
+            )
+
+        import concerto as _concerto
+
+        self._concerto = _concerto
+        self.concat_levels = int(concat_levels)
+
+        # transform（与 demo 保持一致）
+        self.transform = _concerto.transform.default()
+
+        # 加载模型（冻结）
+        if enable_flash:
+            custom_config = None
+        else:
+            custom_config = dict(
+                enc_patch_size=[enc_patch_size for _ in range(5)],
+                enable_flash=False,
+            )
+        self.model = _concerto.load(ckpt_path, custom_config=custom_config).to(device)
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    @torch.no_grad()
+    def extract_features_one(self, xyz: torch.Tensor, rgb: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """
+        参数:
+          xyz: (N,3) float tensor
+          rgb: (N,3) float tensor, [0,1]
+        返回:
+          feat: (N, D) float tensor，与输入点顺序对齐
+        """
+        xyz_np = xyz.detach().cpu().numpy().astype(np.float32)
+        if rgb is None:
+            rgb_uint8 = np.zeros_like(xyz_np, dtype=np.uint8)
+        else:
+            rgb_uint8 = (
+                (rgb.detach().cpu().numpy() * 255.0)
+                .clip(0, 255)
+                .astype(np.uint8)
+            )
+        normal_np = np.zeros_like(xyz_np, dtype=np.float32)
+
+        data = {"coord": xyz_np, "color": rgb_uint8, "normal": normal_np}
+        data = self.transform(data)
+
+        # move tensors to device
+        for k, v in list(data.items()):
+            if isinstance(v, torch.Tensor):
+                data[k] = v.to(device, non_blocking=True)
+
+        # 前向（强制 FP32，减少数值问题）
+        from torch.cuda.amp import autocast
+        with autocast(enabled=False):
+            point = self.model(data)
+
+            # upcast（与 Concerto demo 保持一致）
+            for _ in range(self.concat_levels):
+                assert "pooling_parent" in point.keys()
+                assert "pooling_inverse" in point.keys()
+                parent = point.pop("pooling_parent")
+                inverse = point.pop("pooling_inverse")
+                parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
+                point = parent
+            while "pooling_parent" in point.keys():
+                assert "pooling_inverse" in point.keys()
+                parent = point.pop("pooling_parent")
+                inverse = point.pop("pooling_inverse")
+                parent.feat = point.feat[inverse]
+                point = parent
+
+        if "inverse" not in point.keys():
+            raise KeyError("Concerto transform 未提供 inverse（需要 GridSample(return_inverse=True)）")
+
+        feat = point.feat[point.inverse]  # (N, D)
+
+        # 数值稳定性
+        feat = torch.clamp(feat, min=-100, max=100)
+        feat = torch.nan_to_num(feat, nan=0.0, posinf=100.0, neginf=-100.0)
+        return feat
+
+
+class ConcertoDINOSAUR(nn.Module):
+    """
+    Concerto + Projector + DINOSAUR 模型封装
+
+    输入: xyz (B, N, 3), rgb (B, N, 3)
+    输出: reconstruction, slots, masks, sp_feats_proj, sampled_coords
+    """
+
+    def __init__(
+        self,
+        concerto_extractor: ConcertoPointFeatureExtractor,
+        projector: nn.Module,
+        dinosaur: nn.Module,
+        num_superpoints: int = 4096,
+    ):
+        super().__init__()
+        self.concerto = concerto_extractor
+        self.projector = projector
+        self.dinosaur = dinosaur
+        self.num_superpoints = int(num_superpoints)
+
+        print("[ConcertoDINOSAUR] 模型初始化完成")
+        print("  - Concerto: 冻结")
+        print(f"  - 超点数量: {self.num_superpoints}")
+        print("  - Projector: 可训练")
+        print("  - DINOSAUR: 可训练")
+
+    def normalize_coords(self, coords: torch.Tensor) -> torch.Tensor:
+        """将超点坐标归一化到[-1, 1]"""
+        B = coords.shape[0]
+        coords_norm = []
+        for i in range(B):
+            c = coords[i]
+            c_min = c.min(dim=0)[0]
+            c_max = c.max(dim=0)[0]
+            c_norm = (c - c_min) / (c_max - c_min + 1e-8)
+            c_norm = c_norm * 2 - 1
+            coords_norm.append(c_norm)
+        return torch.stack(coords_norm, dim=0)
+
+    def extract_and_sample(self, xyz: torch.Tensor, rgb: torch.Tensor, device: torch.device):
+        """
+        用 Concerto 提取逐点特征，再在原始 xyz 上 FPS 采样成固定 num_superpoints
+        返回:
+          sp_feats: (B, num_superpoints, D_concerto)
+          sp_coords: (B, num_superpoints, 3)
+        """
+        B = xyz.shape[0]
+        all_feats = []
+        all_coords = []
+
+        with torch.no_grad():
+            for i in range(B):
+                feat_i = self.concerto.extract_features_one(xyz[i], rgb[i], device=device)  # (N, D)
+                coords_i = xyz[i].to(device)
+                sampled_feats, sampled_coords = fps_sample(
+                    feat_i, coords_i, self.num_superpoints, device
+                )
+                all_feats.append(sampled_feats)
+                all_coords.append(sampled_coords)
+
+        sp_feats = torch.stack(all_feats)   # (B, num_superpoints, D)
+        sp_coords = torch.stack(all_coords) # (B, num_superpoints, 3)
+        return sp_feats, sp_coords
+
+    def forward(self, xyz: torch.Tensor, rgb: torch.Tensor):
+        device = xyz.device
+
+        # 1) Concerto 特征 + FPS 采样（冻结）
+        sp_feats, sampled_coords = self.extract_and_sample(xyz, rgb, device)
+
+        # 2) 特征投影到 hidden_dim（=768）
+        sp_feats_proj = self.projector(sp_feats)
+
+        # 3) 归一化坐标到 [-1,1] 给 ISA
+        sp_coords_norm = self.normalize_coords(sampled_coords)
+
+        # 4) DINOSAUR 前向（强制 FP32）
+        from torch.cuda.amp import autocast
+        with autocast(enabled=False):
+            reconstruction, slots, masks = self.dinosaur(
+                sp_feats_proj.float(),
+                sp_coords_norm.float(),
+            )
+
+        return reconstruction, slots, masks, sp_feats_proj, sampled_coords
+
+    def get_trainable_params(self):
+        params = []
+        params += list(self.projector.parameters())
+        params += list(self.dinosaur.parameters())
+        return params
 
 
 class Mask3DDINOSAUR(nn.Module):
@@ -368,9 +597,25 @@ def create_mask3d_dinosaur_model(config, device='cuda'):
             self.fourier_num_frequencies = config['model'].get('fourier_num_frequencies', 6)
             self.fourier_freq_base = config['model'].get('fourier_freq_base', 2.0)
             self.fourier_include_input = config['model'].get('fourier_include_input', True)
+
+            # === Two-stage Slot Attention (bg/fg -> fg decomposition) ===
+            self.two_stage = config["model"].get("two_stage", False)
+            self.two_stage_stage1_iters = config["model"].get("two_stage_stage1_iters", self.slot_att_iter)
+            self.two_stage_stage2_iters = config["model"].get("two_stage_stage2_iters", self.slot_att_iter)
+            # 背景 slot 的先验（仅 ISA 有效）：背景更大尺度，前景更小尺度
+            self.two_stage_bg_init_scale = config["model"].get("two_stage_bg_init_scale", 2.0)
+            self.two_stage_fg_init_scale = config["model"].get("two_stage_fg_init_scale", 0.3)
+            self.two_stage_bg_init_pos = config["model"].get("two_stage_bg_init_pos", 0.0)
+            self.two_stage_fg_init_pos = config["model"].get("two_stage_fg_init_pos", 0.0)
+            # (B/C) stage1 背景 slot 的额外先验
+            self.two_stage_stage1_bg_mean_init = config["model"].get("two_stage_stage1_bg_mean_init", True)
+            self.two_stage_stage1_bg_no_pe = config["model"].get("two_stage_stage1_bg_no_pe", True)
     
     args = Args()
-    dinosaur = DINOSAURpp(args)
+    if bool(getattr(args, "two_stage", False)) and TwoStageDINOSAURpp is not None:
+        dinosaur = TwoStageDINOSAURpp(args)
+    else:
+        dinosaur = DINOSAURpp(args)
     
     # 打印傅里叶编码信息
     if args.use_fourier_pe:
@@ -620,14 +865,35 @@ def create_logosp_dinosaur_model(config, device='cuda'):
             self.token_num = config['model']['num_superpoints']
             self.num_points = config['model']['num_superpoints']
             self.point_feature_dim = config['model']['hidden_dim']
-            
-            self.use_fourier_pe = config['model'].get('use_fourier_pe', False)
-            self.fourier_num_frequencies = config['model'].get('fourier_num_frequencies', 6)
-            self.fourier_freq_base = config['model'].get('fourier_freq_base', 2.0)
-            self.fourier_include_input = config['model'].get('fourier_include_input', True)
+
+            # GeoPE（DINOSAUR/models/model.py 里默认 True；这里显式透传，便于用 config 控制）
+            self.use_geo_pe = config["model"].get("use_geo_pe", True)
+            self.geo_pe_base = config["model"].get("geo_pe_base", 100.0)
+
+            # Decoder 选择：mlp / transformer
+            self.decoder_type = config["model"].get("decoder_type", "mlp")
+            # Transformer decoder 超参（仅 decoder_type=transformer 时生效）
+            self.decoder_tf_layers = config["model"].get("decoder_tf_layers", 2)
+            self.decoder_tf_heads = config["model"].get("decoder_tf_heads", 8)
+            self.decoder_tf_ff_dim = config["model"].get("decoder_tf_ff_dim", 4 * int(self.slot_dim))
+            self.decoder_tf_dropout = config["model"].get("decoder_tf_dropout", 0.1)
+
+            # === Two-stage Slot Attention ===
+            self.two_stage = config["model"].get("two_stage", False)
+            self.two_stage_stage1_iters = config["model"].get("two_stage_stage1_iters", self.slot_att_iter)
+            self.two_stage_stage2_iters = config["model"].get("two_stage_stage2_iters", self.slot_att_iter)
+            self.two_stage_bg_init_scale = config["model"].get("two_stage_bg_init_scale", 2.0)
+            self.two_stage_fg_init_scale = config["model"].get("two_stage_fg_init_scale", 0.3)
+            self.two_stage_bg_init_pos = config["model"].get("two_stage_bg_init_pos", 0.0)
+            self.two_stage_fg_init_pos = config["model"].get("two_stage_fg_init_pos", 0.0)
+            self.two_stage_stage1_bg_mean_init = config["model"].get("two_stage_stage1_bg_mean_init", True)
+            self.two_stage_stage1_bg_no_pe = config["model"].get("two_stage_stage1_bg_no_pe", True)
     
     args = Args()
-    dinosaur = DINOSAURpp(args)
+    if bool(getattr(args, "two_stage", False)) and TwoStageDINOSAURpp is not None:
+        dinosaur = TwoStageDINOSAURpp(args)
+    else:
+        dinosaur = DINOSAURpp(args)
     print(f"✓ DINOSAUR: {args.num_slots} slots, {args.slot_dim}D")
     
     # 4. 封装完整模型
@@ -651,6 +917,114 @@ def create_logosp_dinosaur_model(config, device='cuda'):
     print(f"可训练参数: {trainable_params:,} ({trainable_params/1e6:.2f}M)")
     print("=" * 60)
     
+    return model
+
+
+def create_concerto_dinosaur_model(config, device='cuda'):
+    """
+    工厂函数：创建 Concerto + DINOSAUR 模型
+
+    需要配置项：
+      - config['paths']['concerto_checkpoint']：本地 ckpt 路径（例如 concerto_base.pth）
+      - config['model']['hidden_dim']：DINOSAUR 输入维度（必须 768）
+      - config['model']['num_superpoints']：FPS token 数
+    """
+    print("=" * 60)
+    print("创建 Concerto + DINOSAUR 模型")
+    print("=" * 60)
+
+    ckpt_path = config.get("paths", {}).get("concerto_checkpoint", None)
+    if ckpt_path is None:
+        raise KeyError("缺少配置 paths.concerto_checkpoint（Concerto 权重路径）")
+
+    # Concerto 上采样拼接层数（默认与 demo 一致：2）
+    concat_levels = int(config.get("paths", {}).get("concerto_concat_levels", 2))
+
+    # 根据 ckpt config 推断 Concerto 输出维度，提前构建 Projector（避免 DDP 动态创建参数）
+    try:
+        import concerto as _concerto
+        ckpt = _concerto.model.load(ckpt_path, ckpt_only=True)
+        feat_dim = _infer_concerto_feat_dim(ckpt["config"], concat_levels=concat_levels)
+    except Exception:
+        # 如果推断失败，回退到常见 base/large 的 1088
+        feat_dim = int(config.get("paths", {}).get("concerto_feat_dim_fallback", 1088))
+
+    hidden_dim = int(config["model"]["hidden_dim"])
+    print(f"[Concerto] checkpoint: {ckpt_path}")
+    print(f"[Concerto] concat_levels: {concat_levels}, feat_dim≈{feat_dim}")
+
+    # 1) Concerto 特征提取器（冻结）
+    enable_flash = bool(config.get("paths", {}).get("concerto_enable_flash", False))
+    enc_patch_size = int(config.get("paths", {}).get("concerto_enc_patch_size", 1024))
+    concerto_extractor = ConcertoPointFeatureExtractor(
+        ckpt_path=ckpt_path,
+        device=device,
+        concat_levels=concat_levels,
+        enable_flash=enable_flash,
+        enc_patch_size=enc_patch_size,
+    )
+
+    # 2) Projector（Concerto feat_dim -> hidden_dim）
+    projector = FeatureProjector(in_dim=feat_dim, out_dim=hidden_dim)
+    print(f"✓ Projector: {feat_dim}D → {hidden_dim}D")
+
+    # 3) DINOSAUR（与其他分支保持一致）
+    class Args:
+        def __init__(self):
+            self.num_slots = config["model"]["num_slots"]
+            self.slot_dim = config["model"]["slot_dim"]
+            self.slot_att_iter = config["model"]["slot_att_iter"]
+            self.query_opt = config["model"].get("query_opt", True)
+            self.ISA = config["model"]["ISA"]
+            self.token_num = config["model"]["num_superpoints"]
+            self.num_points = config["model"]["num_superpoints"]
+            self.point_feature_dim = config["model"]["hidden_dim"]
+
+            # GeoPE
+            self.use_geo_pe = config["model"].get("use_geo_pe", True)
+            self.geo_pe_base = config["model"].get("geo_pe_base", 100.0)
+
+            # Decoder 选择：mlp / transformer
+            self.decoder_type = config["model"].get("decoder_type", "mlp")
+            self.decoder_tf_layers = config["model"].get("decoder_tf_layers", 2)
+            self.decoder_tf_heads = config["model"].get("decoder_tf_heads", 8)
+            self.decoder_tf_ff_dim = config["model"].get("decoder_tf_ff_dim", 4 * int(self.slot_dim))
+            self.decoder_tf_dropout = config["model"].get("decoder_tf_dropout", 0.1)
+
+            # === Two-stage Slot Attention ===
+            self.two_stage = config["model"].get("two_stage", False)
+            self.two_stage_stage1_iters = config["model"].get("two_stage_stage1_iters", self.slot_att_iter)
+            self.two_stage_stage2_iters = config["model"].get("two_stage_stage2_iters", self.slot_att_iter)
+            self.two_stage_bg_init_scale = config["model"].get("two_stage_bg_init_scale", 2.0)
+            self.two_stage_fg_init_scale = config["model"].get("two_stage_fg_init_scale", 0.3)
+            self.two_stage_bg_init_pos = config["model"].get("two_stage_bg_init_pos", 0.0)
+            self.two_stage_fg_init_pos = config["model"].get("two_stage_fg_init_pos", 0.0)
+            self.two_stage_stage1_bg_mean_init = config["model"].get("two_stage_stage1_bg_mean_init", True)
+            self.two_stage_stage1_bg_no_pe = config["model"].get("two_stage_stage1_bg_no_pe", True)
+
+    args = Args()
+    if bool(getattr(args, "two_stage", False)) and TwoStageDINOSAURpp is not None:
+        dinosaur = TwoStageDINOSAURpp(args)
+    else:
+        dinosaur = DINOSAURpp(args)
+    print(f"✓ DINOSAUR: {config['model']['num_slots']} slots, {config['model']['slot_dim']}D")
+
+    # 4) 组装
+    model = ConcertoDINOSAUR(
+        concerto_extractor=concerto_extractor,
+        projector=projector,
+        dinosaur=dinosaur,
+        num_superpoints=config["model"]["num_superpoints"],
+    ).to(device)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("\n" + "=" * 60)
+    print("模型统计:")
+    print("=" * 60)
+    print(f"总参数量: {total_params:,} ({total_params/1e6:.2f}M)")
+    print(f"可训练参数: {trainable_params:,} ({trainable_params/1e6:.2f}M)")
+    print("=" * 60)
     return model
 
 

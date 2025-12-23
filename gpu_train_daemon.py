@@ -30,18 +30,18 @@ from typing import List, Optional, Tuple
 # 按顺序执行，前一个任务完成后才执行下一个
 TASK_QUEUE = [
     # {
-    #     "name": "恢复训练scannet2s3dis",
+    #     "name": "恢复训练",
     #     "gpu_ids": [0,1,2,3,4,5,6,7],
-    #     "config": "config/config_train_mask3d_scannet2s3dis.yaml",
+    #     "config": "config/config_train_mask3d_s3dis_1to5_3.yaml",
     #     "extra_args": [
     #         "--resume",
-    #         "/home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d_scannet2s3dis/epoch_025.pth"
+    #         "/home/pbw/data1/3D_PointCloud_Segmentation/PLSG_Net/Model_Code/src/DINOSAUR/checkpoints_mask3d_s3dis/1to5_3/best_model.pth"
     #     ],
     # },
     # {
-    #     "name": "mask3d_s3dis_1to5",
+    #     "name": "mask3d_s3dis_1to5_3",
     #     "gpu_ids": [0,1,2,3,4,5,6,7],            # 候选GPU列表（按优先级），哪张空闲用哪张
-    #     "config": "config/config_train_mask3d_s3dis_1to5.yaml",
+    #     "config": "config/config_train_mask3d_s3dis_1to5_3.yaml",
     #     "extra_args": [],
     # },
     # {
@@ -63,9 +63,9 @@ TASK_QUEUE = [
     #         "extra_args": [],
     # }
     # {
-    #     "name": "LogoSP_s3dis",
+    #     "name": "LogoSP_s3dis_2",
     #         "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
-    #         "config": "config/config_train_LogoSP_s3dis.yaml",
+    #         "config": "config/config_train_LogoSP_s3dis_2.yaml",
     #         "extra_args": [],
     # }
     # {
@@ -80,12 +80,24 @@ TASK_QUEUE = [
     #         "config": "config/config_train_LogoSP_s3dis2scannet.yaml",
     #         "extra_args": [],
     # }
+    # {
+    #     "name": "LogoSP_scannet2s3dis",
+    #         "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+    #         "config": "config/config_train_LogoSP_scannet2s3dis.yaml",
+    #         "extra_args": [],
+    # }
     {
-        "name": "LogoSP_scannet2s3dis",
-            "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
-            "config": "config/config_train_LogoSP_scannet2s3dis.yaml",
-            "extra_args": [],
+        "name": "concerto_scannet",
+        "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+        "config": "config/config_train_concerto_scannet.yaml",
+        "extra_args": [],
     }
+    # {
+    #     "name": "concerto_s3dis",
+    #     "gpu_ids": [0,1,2,3,4,5,6,7],            # 同样支持多卡
+    #     "config": "config/config_train_concerto_s3dis.yaml",
+    #     "extra_args": [],
+    # }
 ]
 
 # 轮询间隔（秒）
